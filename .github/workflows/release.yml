@@ -2,9 +2,14 @@ name: release
 # A tag builds every platform the README names, installs each build on a fresh machine of that platform with the
 # README's own installer, and publishes only when every one of them passes `ox doctor` and reads back a signed memory.
 # Then it installs from the public release, as a stranger would, and checks again (Blaze, 1 Nov 2026: "failing is
-# failing, why are we shipping failing things"). workflow_dispatch runs everything except publishing.
+# failing, why are we shipping failing things"). A push to dev that changes the installers, or workflow_dispatch, runs
+# everything except publishing.
 on:
-  push: { tags: ["v*"] }
+  push:
+    tags: ["v*"]
+    # A change to how dotOracle installs is proved on every platform the moment it lands (nothing publishes from a branch).
+    branches: [dev]
+    paths: [".github/workflows/release.yml", "scripts/install.sh", "scripts/install.ps1", "scripts/smoke-install.sh", "scripts/smoke-install.ps1"]
   workflow_dispatch:
 permissions: { contents: write }
 jobs:
