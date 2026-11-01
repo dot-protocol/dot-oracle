@@ -1,0 +1,40 @@
+[package]
+name = "oracle-server"
+description = "Oracle: a signed, shared memory for agents. One binary, one SQLite file."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[lib]
+name = "oracle_server"
+path = "src/lib.rs"
+
+[dependencies]
+oracle-proto = { path = "../oracle-proto" }
+oracle-mcp = { path = "../oracle-mcp" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "net"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+ureq = { version = "2", features = ["json"] }
+clap = { version = "4", features = ["derive", "env"] }
+regex = "1"
+ed25519-dalek = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

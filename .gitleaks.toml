@@ -1,0 +1,13 @@
+# gitleaks: the default rules, plus the four test fixtures it flags (none is a real secret).
+# Measured 2026-10-17 (#oracle, launch gate M0): keyfile.rs's doc comment and placeholder PEMs,
+# the oracle-say/2 golden vector (seed 0x07 x 32) and a fake bearer sent to a fake server in a test.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures, not secrets"
+paths = [
+  '''crates/oracle-proto/src/keyfile\.rs''',
+  '''crates/oracle-proto/testdata/say-v2-golden\.json''',
+  '''ops/test_mcp_calls\.py''',
+]

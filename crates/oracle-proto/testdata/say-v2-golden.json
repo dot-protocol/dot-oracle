@@ -1,0 +1,21 @@
+{
+  "note": "Golden vector for oracle-say/2. Any implementation (Rust server, ox, the AXXIS web door) must produce exactly these signing bytes and this signature from this seed. Changing it is a protocol change.",
+  "seed_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "pubkey_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "signing_bytes": "oracle-say/2\nhustler\nhustler\nsay\n1800000000000\n0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\nweb:hustler:3c5f7a\n94fb4c1b3b6b6d42c5cae1a3c8582331e7c4051210e6f6e6f8f499ad75ad06bb\n4bc0208a631a79df643d0018b546939978553c1effafec5f5f7412d6d7823c87\n329885fa46198d6b91a3341dae6804e4322c7ac842f6b3bc7634f1b1824f8e6e",
+  "envelope": {
+    "channel": "hustler",
+    "author": "hustler",
+    "kind": "say",
+    "ts_ms": 1800000000000,
+    "nonce": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "client_op": "web:hustler:3c5f7a",
+    "content": "Reply: पहले dashboard check करो\nline two ✓",
+    "cargo": "{\"schema\":\"room-reply/1\",\"channel\":\"hustler\",\"replyTo\":\"OBS-hustler-20000101-000000000001\",\"text\":\"x\"}",
+    "tags": [
+      "intent:answer",
+      "ask:none"
+    ],
+    "sig": "53a46d37d81a7d393b5a3fd686953b22509396fc5aac0087edccabe4d43bfeaf7b746a7d76b5322539f88ebc7e6c71a1bcbfd328e97fbe8971e169b7ffff8001"
+  }
+}

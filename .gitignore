@@ -1,0 +1,10 @@
+/target
+*.db
+*.db-wal
+*.db-shm
+.env
+/data
+__pycache__/
+*.pyc
+crates/graphify-out/
+._*

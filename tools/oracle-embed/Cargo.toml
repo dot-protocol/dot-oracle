@@ -1,0 +1,22 @@
+[package]
+name = "oracle-embed"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Oracle's meaning-search embedder: the model held loaded, behind the same /api/embed Ollama speaks"
+
+[dependencies]
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+
+[workspace]

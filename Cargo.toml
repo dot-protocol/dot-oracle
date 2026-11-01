@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/oracle-proto", "crates/oracle-mcp", "crates/oracle-server", "crates/ox"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# File::lock (ox) needs 1.89 and icu_* 2.3 (via url/idna) 1.88; without this an older rustc fails deep inside a build.
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/dot-protocol/dot-oracle"
+
+[workspace.dependencies]
+ed25519-dalek = "2"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+flate2 = "1"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

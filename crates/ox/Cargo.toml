@@ -1,0 +1,23 @@
+[package]
+name = "ox"
+description = "ox — the Oracle CLI. Sign, speak, fold, search."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+oracle-proto = { path = "../oracle-proto" }
+oracle-mcp = { path = "../oracle-mcp" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+oracle-server = { path = "../oracle-server" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
