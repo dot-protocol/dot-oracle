@@ -411,7 +411,7 @@ pub fn fold_room(room: &str, revisions: Vec<Rev>, mut refused: Vec<Refusal>) -> 
         visiting.insert(id.to_owned());
         let result = match resolve(id) {
             Some(i) => deps(i).iter().any(|d| {
-                let next = resolve(d).map(&name).unwrap_or_else(|| d.clone());
+                let next = resolve(d).map(name).unwrap_or_else(|| d.clone());
                 cyclic(&next, resolve, deps, name, memo, visiting)
             }),
             None => false,

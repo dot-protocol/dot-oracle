@@ -29,7 +29,7 @@ pub fn brief(s: &Store, name: &str, seat: &str) -> Result<Value> {
     let scope = s.seat_rooms_for(seat)?;
     let visible =
         |room: &str| !hidden.contains(room) && scope.as_ref().is_none_or(|r| r.may_read(room));
-    let source_visible = |id: &str| privaterooms::room_of_id(id).is_none_or(&visible);
+    let source_visible = |id: &str| privaterooms::room_of_id(id).is_none_or(visible);
     let (_, classes) = s.cortex_with_classes()?;
     // Filter before folding: a hidden link or verdict cannot affect a public section.
     let rows = s
@@ -42,7 +42,7 @@ pub fn brief(s: &Store, name: &str, seat: &str) -> Result<Value> {
         .nodes
         .iter()
         .filter(|n| {
-            n.superseded_by.is_none() && n.source["message"].as_str().is_none_or(&source_visible)
+            n.superseded_by.is_none() && n.source["message"].as_str().is_none_or(source_visible)
         })
         .collect();
     let name = cortex::slug(name);
