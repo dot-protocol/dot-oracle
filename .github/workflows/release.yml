@@ -67,13 +67,18 @@ jobs:
         shell: bash
         run: |
           cp scripts/install.sh scripts/smoke-install.sh dist/
-          ORACLE_DOWNLOAD_BASE="file://$PWD/dist" HOME="$(mktemp -d)" sh dist/smoke-install.sh
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory dist > /dev/null 2>&1 &
+          sleep 2
+          ORACLE_DOWNLOAD_BASE="http://127.0.0.1:8765" HOME="$(mktemp -d)" sh dist/smoke-install.sh
       - name: the README install and first minute (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Copy-Item scripts/install.ps1, scripts/smoke-install.ps1 dist/
-          $env:ORACLE_DOWNLOAD_BASE = (New-Object System.Uri ((Resolve-Path dist).Path)).AbsoluteUri
+          # Served over HTTP as GitHub serves a release: PowerShell's Invoke-WebRequest does not read file:// at all.
+          Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'dist' -WindowStyle Hidden
+          Start-Sleep 3
+          $env:ORACLE_DOWNLOAD_BASE = 'http://127.0.0.1:8765'
           ./dist/smoke-install.ps1
 
   publish:
