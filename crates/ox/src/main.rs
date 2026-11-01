@@ -1368,6 +1368,10 @@ fn write_durable(path: &Path, body: &str) -> Result<()> {
     f.sync_all()?;
     drop(f);
     std::fs::rename(&tmp, path)?;
+    // The directory is synced on Unix so the rename survives power loss. Windows cannot open a directory as a file
+    // ("Access is denied", os error 5: every signed write failed there, found by the release smoke on 1 Nov 2026);
+    // its rename (MoveFileEx, replacing) is the durable step.
+    #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
