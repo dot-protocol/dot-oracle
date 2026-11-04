@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- One handle rule and one HTML escape in the server (code audit, 4 Nov 2026). The table handle check was written five
+  times, byte for byte (aliases, `oracle up`, private rooms, retention, seat rooms); it is now `naming::handle_ok`,
+  with the reason the protocol's own rule stays wider (signed history holds a handle starting with `_`). The public
+  record page and the OAuth consent page share `naming::esc`, which also escapes `'`; the statechart writer keeps its
+  own XML escape, because it writes into comments where a reference is not decoded. No behaviour changes; the affected
+  suites pass unchanged.
+- CI builds tests with line tables only and no incremental cache. A full-debug test build is 14.9 GB, line tables 2.5 GB
+  (measured on core, 4 Nov 2026); the hosted runner's disk filled and the linker died with a bus error.
+
+- Withheld links in the author chain (oracle.chain-placeholders; docs/CHAIN.md "Withheld links"). A seat's own chain
+  through a room that later went private without it no longer comes back with those records dropped, which made
+  `ox chain` report a break that was not a fork. `GET /chain/{author}` gives each as a withheld link (its place, the
+  author, `prev` and `sig`; no room, words or id), `check_chain` keeps checking the links on both sides and counts it
+  as `withheld`, and `ox verify` counts it beside verified and failed. `ChainRecord` gains `withheld` (default false,
+  omitted when false, so every existing face reads as before). A real-server test proves the link names nothing of the
+  room, the chain checks whole, a member reads it whole, and a dropped or invented link breaks.
+
 - The recall gate (plan.oracle.search CI-S9): `crates/oracle-server/tests/recall_gate.rs` writes a synthetic team
   memory (46 signed records, four rooms, `tests/data/recall-gate/`) and asks it 27 fixed questions through the ranked
   recall agents use, words only and fused with a toy embedder, and fails when any category's count falls below

@@ -18,6 +18,7 @@ pub mod livestate;
 pub mod legacy;
 pub mod lifecycle;
 pub mod mcp;
+pub mod naming;
 pub mod metrics;
 pub mod minds;
 pub mod fold_cache;

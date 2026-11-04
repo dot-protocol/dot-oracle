@@ -25,6 +25,9 @@ replay from its own owner key.
 A server publishes its key file at `https://<your-oracle>/.well-known/oracle-keys.json`, refreshed every 15 minutes
 by `ops/systemd/oracle-keys-export.timer`. Pin the owner key from a second place you trust, not from this file.
 
+A face exported by a seat may hold withheld links (docs/CHAIN.md, "Withheld links"): records in rooms that seat may
+no longer read. `ox verify` reports them as `withheld`, neither verified nor failed.
+
 ## The check
 
 `ox verify face.jsonl --keys keys.json --owner-key <hex>` (the face comes from `ox chain --out`, docs/CHAIN.md):

@@ -23,10 +23,7 @@ pub struct Rule {
 /// `room → its rule`.
 pub type Table = BTreeMap<String, Rule>;
 
-fn name_ok(h: &str) -> bool {
-    let b = h.as_bytes();
-    !b.is_empty() && b.len() <= 64 && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' || *c == b'_')
-}
+use crate::naming::handle_ok as name_ok;
 
 /// A record's table, or why it cannot be honoured. The CLI and the store use this one function.
 pub fn parse(cargo: &str) -> Result<Table, String> {

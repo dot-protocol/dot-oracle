@@ -3064,6 +3064,9 @@ fn verify_cmd(face: &Path, keys: &Path, owner_key: Option<&str>, json: bool) -> 
         println!("{}", json!({"report": r, "owner": file.owner, "owner_pubkey": file.owner_pubkey, "owner_pinned": pinned.is_some(), "key_events": file.events.len()}));
     } else {
         println!("verify  {} records · {} verified · {} failed · key log {} events from owner {}", r.records, r.verified, r.failures.len(), file.events.len(), file.owner);
+        if r.withheld > 0 {
+            println!("note    {} withheld link(s): records in rooms this face's reader may not read; linked, not signature-checked (docs/CHAIN.md)", r.withheld);
+        }
         for f in &r.failures {
             println!("FAIL    {}  {}", f.id, f.why);
         }
@@ -3104,8 +3107,13 @@ fn chain_report(r: &oracle_proto::ChainReport, json: bool) -> Result<()> {
         for b in &r.breaks {
             println!("BREAK  {}  {}", b.id, b.why);
         }
-        if r.breaks.is_empty() {
+        if r.breaks.is_empty() && r.withheld == 0 {
             println!("whole: every signature verifies over its rebuilt bytes, every id matches, every prev names the record before it");
+        } else if r.breaks.is_empty() {
+            println!(
+                "whole: every prev names the record before it; {} withheld link(s) (records in rooms you may not read) carry no bytes to verify, every other signature and id verifies",
+                r.withheld
+            );
         }
     }
     if !r.breaks.is_empty() {
@@ -7612,7 +7620,7 @@ mod emmy_v5_chain_review {
             let mut env=Envelope::sign(&key,"room","rocky",Kind::Say,"same body",None,vec![],now_ms());
             env=env.chain_to(oracle_proto::GENESIS_PREV,&key,now_ms());
             if !wrong_key {env.content="tampered after signing".into();}
-            let cr=oracle_proto::ChainRecord{seq:1,id:format!("OBS-room-20261021-{}",&oracle_proto::link_of(&env.sig)[..12]),pubkey:pubkey_hex(&key),envelope:env};
+            let cr=oracle_proto::ChainRecord{seq:1,id:format!("OBS-room-20261021-{}",&oracle_proto::link_of(&env.sig)[..12]),pubkey:pubkey_hex(&key),envelope:env,withheld:false};
             assert_eq!(cr.envelope.verify_stored(&cr.pubkey).is_ok(),wrong_key);
             let record_id=cr.id.clone();
             let body=serde_json::to_string(&json!({"records":[cr]})).unwrap();
@@ -7667,7 +7675,7 @@ mod v5_chain_controls {
     }
 
     fn record(seq: i64, env: Envelope, pubkey: &str) -> ChainRecord {
-        ChainRecord { seq, id: format!("OBS-room-20261021-{}", &link_of(&env.sig)[..12]), pubkey: pubkey.to_string(), envelope: env }
+        ChainRecord { seq, id: format!("OBS-room-20261021-{}", &link_of(&env.sig)[..12]), pubkey: pubkey.to_string(), envelope: env, withheld: false }
     }
 
     /// The honest case, built once: the predecessor (rocky's first record, chained to genesis), a kind-2 dot naming

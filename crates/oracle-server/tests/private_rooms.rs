@@ -150,3 +150,50 @@ fn a_private_room_is_never_public_even_when_the_public_list_names_it() {
     let (_, body) = anon("/public/search?q=PRIVATE_SALARY");
     assert!(!body.contains("PRIVATE_SALARY"), "{body}");
 }
+
+/// Signed over the author's head as ox signs (docs/CHAIN.md), so the records are linked and the check below means something.
+fn chained(s: &Store, room: &str, who: &str, text: &str, at: i64) -> String {
+    let (head, _) = s.chain_head(who).unwrap();
+    let env = Envelope::sign(&sk(key(who)), room, who, Kind::Say, text, None, vec![], at).chain_to(&head, &sk(key(who)), at);
+    s.write(&Principal { handle: who.into(), scope: Scope::Write }, &env, at).unwrap().id
+}
+
+#[test]
+fn a_chain_through_a_room_that_went_private_is_whole_with_a_withheld_link() {
+    // oracle.chain-placeholders (found 4 Nov 2026 testing ox verify): a seat wrote in a room that later went private
+    // without it. Its own chain used to come back with those records dropped by the private-rooms guard, so the chain
+    // check showed a break that was not a fork. Now the record is a withheld link: its place, prev and sig, nothing else.
+    let s = start();
+    chained(&s.store, "rocky", "rocky", "before, in my room", 10);
+    let inside = chained(&s.store, "imran", "rocky", "WITHHELD_WORDS written while the room was open", 11);
+    chained(&s.store, "rocky", "rocky", "after, in my room again", 12);
+    private(&s.store, "blaze", json!({"imran": ["imran", "tara", "blaze"]}), 13).unwrap();
+
+    let (code, body) = s.get(&s.rocky, "/chain/rocky");
+    assert_eq!(code, 200, "{body}");
+    assert!(!body.contains("WITHHELD_WORDS") && !body.contains("imran") && !body.contains(&inside), "the link names nothing of the room: {body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let recs: Vec<oracle_proto::ChainRecord> = serde_json::from_value(v["records"].clone()).unwrap();
+    assert_eq!(recs.len(), 3, "the withheld record keeps its place: {body}");
+    assert!(recs[1].withheld && !recs[0].withheld && !recs[2].withheld);
+    let report = oracle_proto::check_chain(&recs);
+    assert!(report.breaks.is_empty(), "{report:?}");
+    assert_eq!((report.chained, report.withheld, report.from_genesis), (3, 1, true));
+
+    // Negative controls: the same face with the withheld line removed breaks, and so does one whose withheld sig was
+    // changed (the next record's prev no longer names it), so a server cannot drop or invent a link and still pass.
+    let mut dropped = recs.clone();
+    dropped.remove(1);
+    assert_eq!(oracle_proto::check_chain(&dropped).breaks.len(), 1, "a dropped link is a break");
+    let mut forged = recs.clone();
+    forged[1].envelope.sig = "00".repeat(64);
+    assert_eq!(oracle_proto::check_chain(&forged).breaks.len(), 1, "an invented link is a break");
+
+    // A member reads the same chain whole: nothing is withheld from the room's own members (the owner here, with an
+    // admin token, since a chain is read by its author or an admin).
+    let admin = s.store.mint_token("blaze", Scope::Admin, "chain-test", 14).unwrap();
+    let (_, whole) = s.get(&admin, "/chain/rocky");
+    let recs: Vec<oracle_proto::ChainRecord> = serde_json::from_value(serde_json::from_str::<Value>(&whole).unwrap()["records"].clone()).unwrap();
+    assert!(recs.iter().all(|r| !r.withheld) && recs[1].id == inside, "{whole}");
+    assert_eq!(oracle_proto::check_chain(&recs).withheld, 0);
+}

@@ -265,6 +265,40 @@ pub struct ChainRecord {
     pub id: String,
     pub pubkey: String,
     pub envelope: Envelope,
+    /// A link withheld from this reader (docs/CHAIN.md "Withheld links"): the record is in a room the reader may not
+    /// read, so the server gives only its place: `seq`, the author, `prev` and `sig`. The room, words and id are blanked,
+    /// so its signature cannot be checked, but the links on both sides of it can: `prev` against the record before, and
+    /// the next record's `prev` against this `sig`. Absent (false) on every record given whole.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withheld: bool,
+}
+
+impl ChainRecord {
+    /// This record as a withheld link: the place in the chain kept (author, kind, time, `prev`, `sig`), everything that
+    /// says where it was written or what it says blanked. The id is replaced too, because an id names its room.
+    pub fn withhold(self) -> ChainRecord {
+        let e = self.envelope;
+        ChainRecord {
+            seq: self.seq,
+            id: format!("withheld-{}", self.seq),
+            pubkey: self.pubkey,
+            envelope: Envelope {
+                channel: String::new(),
+                author: e.author,
+                kind: e.kind,
+                ts_ms: e.ts_ms,
+                nonce: String::new(),
+                client_op: String::new(),
+                content: String::new(),
+                cargo: None,
+                tags: Vec::new(),
+                authored_ms: None,
+                prev: e.prev,
+                sig: e.sig,
+            },
+            withheld: true,
+        }
+    }
 }
 
 /// What [`check_chain`] found. `breaks` is empty for a whole chain.
@@ -273,6 +307,9 @@ pub struct ChainReport {
     pub records: usize,
     pub chained: usize,
     pub unchained: usize,
+    /// Links given without their record (in a room this reader may not read): counted, linked, not signature-checked.
+    #[serde(default)]
+    pub withheld: usize,
     pub first_chained: Option<String>,
     pub from_genesis: bool,
     pub breaks: Vec<ChainBreak>,
@@ -295,11 +332,17 @@ pub fn check_chain(records: &[ChainRecord]) -> ChainReport {
         if Some(rec.envelope.author.as_str()) != author {
             broke("another author's record");
         }
-        if rec.envelope.verify_stored(&rec.pubkey).is_err() {
-            broke("bad signature");
-        }
-        if rec.id.rsplit('-').next() != Some(&link_of(&rec.envelope.sig)[..12]) {
-            broke("id does not match its signature");
+        if rec.withheld {
+            // Only the link is given: the signed bytes are not, so there is no signature or id to check here. Its `prev`
+            // is still checked below, and the next record's `prev` is checked against its `sig`, so the chain stays whole.
+            r.withheld += 1;
+        } else {
+            if rec.envelope.verify_stored(&rec.pubkey).is_err() {
+                broke("bad signature");
+            }
+            if rec.id.rsplit('-').next() != Some(&link_of(&rec.envelope.sig)[..12]) {
+                broke("id does not match its signature");
+            }
         }
         match rec.envelope.prev.as_deref() {
             None => r.unchained += 1,
@@ -678,7 +721,7 @@ mod tests {
 
     fn rec(e: Envelope, seq: i64) -> ChainRecord {
         let id = format!("OBS-room-20261020-{}", &link_of(&e.sig)[..12]);
-        ChainRecord { seq, id, pubkey: pubkey_hex(&key()), envelope: e }
+        ChainRecord { seq, id, pubkey: pubkey_hex(&key()), envelope: e, withheld: false }
     }
 
     /// Four writes: one before chains existed, then three linked ones.

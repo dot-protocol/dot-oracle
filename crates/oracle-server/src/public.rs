@@ -70,9 +70,7 @@ pub fn parse_rooms(spec: &str) -> Vec<PublicRoom> {
         .collect()
 }
 
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
+use crate::naming::esc;
 
 fn not_public() -> Response {
     (StatusCode::NOT_FOUND, "not public").into_response()

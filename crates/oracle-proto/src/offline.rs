@@ -140,6 +140,9 @@ pub fn replay(owner: &str, owner_pubkey: &str, events: &[KeyEvent]) -> Result<Ke
 pub struct OfflineReport {
     pub records: usize,
     pub verified: usize,
+    /// Withheld links (docs/CHAIN.md): no signed bytes to check, so neither verified nor failed; counted so a reader sees them.
+    #[serde(default)]
+    pub withheld: usize,
     pub failures: Vec<ChainBreak>,
 }
 
@@ -147,6 +150,10 @@ pub struct OfflineReport {
 pub fn verify_records(book: &KeyBook, records: &[ChainRecord]) -> OfflineReport {
     let mut r = OfflineReport { records: records.len(), ..Default::default() };
     for rec in records {
+        if rec.withheld {
+            r.withheld += 1;
+            continue;
+        }
         let e = &rec.envelope;
         let why = if e.verify_stored(&rec.pubkey).is_err() {
             Some("bad signature".to_string())
@@ -222,7 +229,7 @@ mod tests {
     fn record(sk: &SigningKey, author: &str, ts: i64) -> ChainRecord {
         let env = Envelope::sign(sk, "room", author, Kind::Say, "hello", None, vec![], ts);
         let id = format!("OBS-room-20000101-{}", &link_of(&env.sig)[..12]);
-        ChainRecord { seq: 1, id, pubkey: pubkey_hex(sk), envelope: env }
+        ChainRecord { seq: 1, id, pubkey: pubkey_hex(sk), envelope: env, withheld: false }
     }
 
     #[test]
@@ -243,5 +250,21 @@ mod tests {
         assert_eq!(r.verified, 1, "{r:?}");
         let whys: Vec<&str> = r.failures.iter().map(|f| f.why.as_str()).collect();
         assert_eq!(whys, ["signed before its key was registered", "signed after its key was revoked", "the key is not one of bob's", "bad signature"]);
+    }
+
+    #[test]
+    fn a_withheld_link_is_counted_never_verified_and_never_a_failure() {
+        // docs/CHAIN.md "Withheld links": a record in a room the reader may not read has no bytes to verify. It must not
+        // pass as verified (that would vouch for words nobody checked) and must not fail (the record is real, only hidden).
+        let (owner, seat) = (key(1), key(2));
+        let book = replay("ada", &pubkey_hex(&owner), &[KeyEvent::sign(&owner, "ada", KeyAction::Add, "bob", &pubkey_hex(&seat), 1_000)]).unwrap();
+        let hidden = record(&seat, "bob", 5_000).withhold();
+        assert!(hidden.envelope.channel.is_empty() && hidden.envelope.content.is_empty() && hidden.id.starts_with("withheld-"));
+        let r = verify_records(&book, &[record(&seat, "bob", 5_000), hidden.clone()]);
+        assert_eq!((r.records, r.verified, r.withheld, r.failures.len()), (2, 1, 1, 0), "{r:?}");
+        // Control: the same record not marked withheld is checked, and with its words blanked its signature fails.
+        let mut unmarked = hidden;
+        unmarked.withheld = false;
+        assert_eq!(verify_records(&book, &[unmarked]).failures.len(), 1);
     }
 }

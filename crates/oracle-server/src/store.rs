@@ -3370,7 +3370,7 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             let (seq, id, pubkey, env) = row?;
-            out.push(oracle_proto::ChainRecord { seq, id, pubkey, envelope: env? });
+            out.push(oracle_proto::ChainRecord { seq, id, pubkey, envelope: env?, withheld: false });
         }
         Ok(out)
     }

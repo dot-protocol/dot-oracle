@@ -12,10 +12,7 @@ pub const SCHEMA: &str = "seat-alias/1";
 /// `label → seat`.
 pub type Aliases = BTreeMap<String, String>;
 
-fn handle_ok(h: &str) -> bool {
-    let b = h.as_bytes();
-    !b.is_empty() && b.len() <= 64 && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' || *c == b'_')
-}
+use crate::naming::handle_ok;
 
 /// A record's table, or why it cannot be honoured. The CLI and the reader use this one function, so what `oracle alias set` accepts is what is read back.
 pub fn parse(cargo: &str) -> Result<Aliases, String> {

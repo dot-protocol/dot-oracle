@@ -1586,12 +1586,12 @@ async fn whoami(State(app): State<App>, headers: HeaderMap) -> Api<Json<serde_js
 }
 
 /// A chain spans every room its author wrote in, so only the author (or an admin) reads it (docs/CHAIN.md).
-async fn chain_reader(app: &App, headers: &HeaderMap, author: &str) -> Api<()> {
+async fn chain_reader(app: &App, headers: &HeaderMap, author: &str) -> Api<Principal> {
     let who = principal(app, headers, Scope::Read).await?;
     if who.handle != author && who.scope < Scope::Admin {
         return Err(ApiError(StoreError::Forbidden(format!("a chain is read by its author or an admin, not by '{}'", who.handle))));
     }
-    Ok(())
+    Ok(who)
 }
 
 /// `GET /chain/{author}/head` — the link the author's next write names as `prev`.
@@ -1610,10 +1610,18 @@ struct ChainQ {
 
 /// `GET /chain/{author}?after=&limit=` — the author's native observations in order, each as signed (docs/CHAIN.md).
 async fn chain_read(State(app): State<App>, headers: HeaderMap, Path(author): Path<String>, Query(q): Query<ChainQ>) -> Api<Json<serde_json::Value>> {
-    chain_reader(&app, &headers, &author).await?;
+    let who = chain_reader(&app, &headers, &author).await?;
     let limit = q.limit.unwrap_or(500).clamp(1, 2000);
     let a = author.clone();
-    let records = blocking(&app, move |s| s.chain(&a, q.after.unwrap_or(0), limit)).await?;
+    let records = blocking(&app, move |s| {
+        let records = s.chain(&a, q.after.unwrap_or(0), limit)?;
+        // A seat that wrote in a room it can no longer read (the room went private without it) gets those records as
+        // withheld links, never dropped: the private-rooms guard would drop them whole, and the chain would show a break
+        // that is not a fork (docs/CHAIN.md "Withheld links"). The link keeps no room, words or id.
+        let hidden = crate::privaterooms::hidden_for(&s.private_rooms_table()?, &who.handle);
+        Ok(records.into_iter().map(|r| if hidden.contains(&r.envelope.channel) { r.withhold() } else { r }).collect::<Vec<_>>())
+    })
+    .await?;
     let next = (records.len() == limit).then(|| records.last().map(|r| r.seq)).flatten();
     Ok(Json(json!({"author": author, "records": records, "next": next})))
 }

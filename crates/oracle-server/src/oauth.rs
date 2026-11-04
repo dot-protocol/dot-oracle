@@ -179,9 +179,7 @@ fn normalise_handle(h: &str) -> String {
 }
 
 /// Python's `html.escape(s, quote=True)`.
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#x27;")
-}
+use crate::naming::esc;
 
 /// Python's `urllib.parse.quote_plus` (what `urlencode` uses).
 fn quote_plus(s: &str) -> String {
