@@ -6,6 +6,8 @@
 //!   mint    cargo {statement, type, status, sources?, row?}      cid = sha256 of the statement, whitespace collapsed
 //!   edge    cargo {from, to, kind}                               kind: supports · contradicts · supersedes · is-same-as · cites
 //!   status  cargo {cid, status, why?}                            the newest status wins; every move stays in history
+//!   source  cargo {cid, sources?, remove?, why?}                 add sources, or take off one that was wrong (4 Nov 2026);
+//!                                                                 a removal is listed on the claim with its record and why
 //!
 //! Cascading refutation (Noor's TASK-OAI-1, 27 Oct: ETH refuted, and hundreds of hardness results rest on it). A claim rests on
 //! another when it `cites` it or is `supports`-ed by it. When a claim it rests on, directly or through others, is refuted after
@@ -53,6 +55,16 @@ pub struct Move {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SourceRemoved {
+    pub source: String,
+    pub by: String,
+    pub author: String,
+    pub at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Claim {
     pub cid: String,
     pub statement: String,
@@ -65,6 +77,10 @@ pub struct Claim {
     pub minted_ms: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
+    /// Sources taken off after they were added (a wrong DOI, a dead link): never erased, said with the signed record that
+    /// removed each and why (Ramanujan, 30 Oct 2026: the superseded PRZZ claim carried a wrong DOI beside the right one).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources_removed: Vec<SourceRemoved>,
     /// The minting room's own label for the row (e.g. Round 53's "B12").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row: Option<String>,
@@ -146,6 +162,7 @@ pub fn fold(rows: &[Observation]) -> Claims {
                 author: o.author.clone(),
                 minted_ms: o.created_ms,
                 sources,
+                sources_removed: Vec::new(),
                 row: field(&cargo, "row").map(str::to_owned),
                 out: vec![],
                 inbound: vec![],
@@ -190,21 +207,35 @@ pub fn fold(rows: &[Observation]) -> Claims {
             }
         } else if o.tags.iter().any(|t| t == "claim:source") {
             // A source added after the mint (Blaze, 30 Oct 2026), kept once each, and only from the claim's own room: a seat
-            // writing in one room never edits another room's claims.
-            let (Some(name), Some(list)) = (field(&cargo, "cid"), cargo["sources"].as_array()) else {
-                reject(&mut rejected, o, "a source needs cid and sources");
+            // writing in one room never edits another room's claims. `remove` takes off a source the claim carries, matched
+            // exactly; the removal stays on the claim with its record. Removing one it does not carry is refused, whole, with
+            // the reason: a typo must not pass for a correction.
+            let strs = |k: &str| -> Vec<String> {
+                cargo[k].as_array().map(|a| a.iter().filter_map(|s| s.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
+            };
+            let (add, remove) = (strs("sources"), strs("remove"));
+            let Some(name) = field(&cargo, "cid").filter(|_| !add.is_empty() || !remove.is_empty()) else {
+                reject(&mut rejected, o, "a source needs cid and sources or remove");
                 continue;
             };
             match resolve(&by_cid, name) {
                 Ok(c) => {
                     let claim = by_cid.get_mut(&c).unwrap();
                     if claim.room != o.channel {
-                        reject(&mut rejected, o, "a source is added in the claim's own room");
+                        reject(&mut rejected, o, "a source is added or removed in the claim's own room");
                         continue;
                     }
-                    for s in list.iter().filter_map(|s| s.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
-                        if !claim.sources.iter().any(|x| x == s) {
-                            claim.sources.push(s.to_owned());
+                    if let Some(missing) = remove.iter().find(|r| !claim.sources.contains(r)) {
+                        reject(&mut rejected, o, &format!("the claim carries no source {missing}"));
+                        continue;
+                    }
+                    for r in &remove {
+                        claim.sources.retain(|x| x != r);
+                        claim.sources_removed.push(SourceRemoved { source: r.clone(), by: o.id.clone(), author: o.author.clone(), at_ms: o.created_ms, why: field(&cargo, "why").map(str::to_owned) });
+                    }
+                    for s in add {
+                        if !claim.sources.contains(&s) {
+                            claim.sources.push(s);
                         }
                     }
                 }

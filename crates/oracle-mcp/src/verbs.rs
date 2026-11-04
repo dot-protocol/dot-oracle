@@ -211,12 +211,33 @@ pub fn claim(op: &str, a: &Value) -> Result<(String, Vec<String>, Value)> {
         "source" => {
             // A source added to a claim already minted (Blaze, 30 Oct 2026: claims editable through Oracle). A claim's words
             // are its cid, so re-minting to add a reference would make a new claim and cut every link to the old one.
+            // `remove` takes off a source that was wrong (a bad DOI); the claim keeps the removal with this record and `why`.
             let cid = hex("cid")?;
-            let src: Vec<String> = a["sources"].as_array().map(|v| v.iter().filter_map(|s| s.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default();
-            if src.is_empty() || src.len() > 10 || src.iter().any(|s| s.len() > 500) {
-                bail!("source needs 1 to 10 sources (OBS ids or dated URLs), each at most 500 characters");
+            let list = |k: &str| -> Vec<String> { a[k].as_array().map(|v| v.iter().filter_map(|s| s.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default() };
+            let (src, rm) = (list("sources"), list("remove"));
+            let n = src.len() + rm.len();
+            if n == 0 || n > 10 || src.iter().chain(&rm).any(|s| s.len() > 500) {
+                bail!("source needs 1 to 10 sources to add or remove (OBS ids or dated URLs), each at most 500 characters");
             }
-            Ok((format!("claim {cid} source: {}", src.join(" · ")), vec!["claim:source".into()], json!({"cid": cid, "sources": src})))
+            let mut face = format!("claim {cid} source:");
+            if !src.is_empty() {
+                face.push_str(&format!(" + {}", src.join(" · ")));
+            }
+            if !rm.is_empty() {
+                face.push_str(&format!(" − {}", rm.join(" · ")));
+            }
+            let mut cargo = json!({"cid": cid});
+            if !src.is_empty() {
+                cargo["sources"] = json!(src);
+            }
+            if !rm.is_empty() {
+                cargo["remove"] = json!(rm);
+            }
+            if let Some(w) = get("why") {
+                cargo["why"] = json!(w);
+                face.push_str(&format!(" ({w})"));
+            }
+            Ok((face, vec!["claim:source".into()], cargo))
         }
         _ => bail!("op is mint, edge, status or source"),
     }
@@ -238,5 +259,22 @@ mod later_tests {
         assert_eq!(until_of("2d", NOW).unwrap(), NOW + 2 * 86_400_000);
         assert_eq!(until_of("1792800000000", NOW).unwrap(), 1_792_800_000_000);
         assert!(until_of("soon", NOW).is_err() && until_of("5y", NOW).is_err());
+    }
+}
+
+#[cfg(test)]
+mod source_removal_tests {
+    use super::claim;
+    use serde_json::json;
+
+    #[test]
+    fn a_source_write_can_remove_with_a_reason_and_still_needs_something_to_do() {
+        let (face, tags, cargo) = claim("source", &json!({"cid": "ccd22744f23a", "remove": ["https://doi.org/wrong"], "why": "Crossref"})).unwrap();
+        assert_eq!(tags, vec!["claim:source".to_string()]);
+        assert_eq!(cargo, json!({"cid": "ccd22744f23a", "remove": ["https://doi.org/wrong"], "why": "Crossref"}));
+        assert!(face.contains("− https://doi.org/wrong") && face.contains("(Crossref)"), "{face}");
+        // Negative control: neither a source to add nor one to remove is refused before anything is signed.
+        assert!(claim("source", &json!({"cid": "ccd22744f23a"})).is_err());
+        assert!(claim("source", &json!({"cid": "ccd22744f23a", "sources": [], "remove": []})).is_err());
     }
 }

@@ -1172,6 +1172,9 @@ enum Cmd {
         status: Option<String>,
         #[arg(long = "source")]
         sources: Vec<String>,
+        /// with source: take this source off the claim, matched exactly (a wrong DOI); with --why, the reason is kept
+        #[arg(long = "remove-source")]
+        remove_sources: Vec<String>,
         #[arg(long)]
         row: Option<String>,
         #[arg(long)]
@@ -4107,7 +4110,7 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 print!("{}", oracle_mcp::cases::text(op, &v));
             }
         }
-        Cmd::Cortex { op, args, statement, kind, status, sources, row, why, room, cid, q, pending, all } => {
+        Cmd::Cortex { op, args, statement, kind, status, sources, remove_sources, row, why, room, cid, q, pending, all } => {
             if matches!(op.as_str(), "nodes" | "node" | "entity" | "marks") {
                 let mut a = json!({"op": op, "room": room, "kind": kind, "q": q, "source": sources.first()});
                 if op == "node" {
@@ -4167,7 +4170,7 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                     "mint" => json!({"statement": statement, "type": kind, "status": status, "sources": sources, "row": row}),
                     "edge" => json!({"from": at(1), "kind": at(2), "to": at(3)}),
                     "status" => json!({"cid": at(1), "status": at(2), "why": why}),
-                    "source" => json!({"cid": at(1), "sources": sources}),
+                    "source" => json!({"cid": at(1), "sources": sources, "remove": remove_sources, "why": why}),
                     _ => bail!("op is mint, edge, status, source or list"),
                 };
                 let (face, tags, cargo) = oracle_mcp::verbs::claim(&op, &a)?;

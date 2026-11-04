@@ -145,3 +145,31 @@ fn a_source_is_added_to_a_minted_claim_once_and_only_from_its_room() {
     assert_eq!(c.cid, cid, "the claim keeps its cid");
     assert_eq!(all.rejected.len(), 3, "{:?}", all.rejected);
 }
+
+#[test]
+fn a_wrong_source_is_taken_off_a_claim_and_the_removal_stays_on_it() {
+    // Ramanujan, 30 Oct 2026: the superseded PRZZ claim on #riemann carried the
+    // right DOI beside a wrong one, and ox could only add sources. `remove` takes one off; the claim says what was removed,
+    // by which signed record and why, so a correction is never a silent edit.
+    let s = oracle();
+    let words = "Pratt, Robles, Zaharescu and Zeindler: more than five-twelfths of the Riemann zeta zeros are on the critical line.";
+    let (right, wrong) = ("https://doi.org/10.1007/s40687-019-0199-8", "https://doi.org/10.1007/s40687-019-00202-8");
+    put(&s, "claim:mint", serde_json::json!({"statement": words, "type": "external", "status": "verified", "sources": [wrong]}), 50);
+    let cid = cid_of(words);
+    put(&s, "claim:source", serde_json::json!({"cid": &cid[..12], "sources": [right]}), 40);
+    let fix = put(&s, "claim:source", serde_json::json!({"cid": &cid[..12], "remove": [wrong], "why": "Crossref title check: the DOI is -0199-8"}), 30);
+    // Negative controls: removing a source the claim does not carry (a typo, or one already removed) is refused whole, and
+    // a write that both removes a missing source and adds one changes nothing.
+    put(&s, "claim:source", serde_json::json!({"cid": &cid[..12], "remove": [wrong]}), 20);
+    put(&s, "claim:source", serde_json::json!({"cid": &cid[..12], "remove": ["https://doi.org/typo"], "sources": ["https://example.org/never"]}), 15);
+    let all = read(&s, None, None, Some(&cid[..12])).unwrap();
+    let c = &all.claims[0];
+    assert_eq!(c.sources, vec![right.to_string()], "only the right DOI is left");
+    assert_eq!(c.sources_removed.len(), 1, "the removal stays on the claim");
+    let r = &c.sources_removed[0];
+    assert_eq!((r.source.as_str(), r.by.as_str(), r.why.as_deref()), (wrong, fix.as_str(), Some("Crossref title check: the DOI is -0199-8")));
+    assert_eq!(c.cid, cid, "the claim keeps its cid and every link to it");
+    let whys: Vec<&str> = all.rejected.iter().filter_map(|r| r["why"].as_str()).collect();
+    assert_eq!(whys.len(), 2, "{whys:?}");
+    assert!(whys.iter().all(|w| w.starts_with("the claim carries no source")), "{whys:?}");
+}

@@ -110,6 +110,7 @@ is reviewed with their dispatch code; the automated command-tree check cannot in
 | `ox cortex edge <room> <from> <relation> <to>` | Link claims: supports, contradicts, supersedes, is-same-as or cites. |
 | `ox cortex status <room> <cid> <status>` | Set verified, refuted or open, optionally `--why`. |
 | `ox cortex source <room> <cid> --source <url>…` | Add sources (OBS ids or dated URLs) to a claim already minted, in its own room; the claim keeps its cid and links. |
+| `ox cortex source <room> <cid> --remove-source <url> --why "…"` | Take off a source the claim carries, matched exactly (a wrong DOI). The claim lists it under `sources_removed` with the record that removed it and why; removing one it does not carry is refused. |
 | `ox cortex list` | Read claims; filter `--room`, `--status` or `--cid`. |
 | `ox cortex nodes` | Read cortex nodes; filter `--room`, `--type` or `--q`. |
 | `ox cortex node <nid>` | Read one cortex node. |

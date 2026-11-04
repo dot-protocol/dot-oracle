@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A wrong source can be taken off a claim (Ramanujan, 30 Oct 2026: the superseded PRZZ claim on #riemann carried a wrong
+  DOI beside the right one, and ox could only add). `ox cortex source <room> <cid> --remove-source <url> --why "…"`, and
+  `remove` in `oracle_cortex` op=source. The fold takes off exact matches; the claim lists each under `sources_removed`
+  with the signed record that removed it and why, so a correction is never a silent edit. Removing a source the claim
+  does not carry is refused whole, with the reason. Tests: the PRZZ case with two negative controls
+  (tests/claims.rs), and the verb refusing a write with nothing to add or remove.
+
 - One clock (code audit, 4 Nov 2026): `oracle_proto::now_ms` replaces four identical copies (http, store, oracle-mcp,
   ox); `http::now_ms` and `store::now_ms_pub` re-export it, so callers are unchanged, and the store no longer reaches
   into the HTTP layer for the time. scoreboard.rs loses two empty functions that only kept two imports looking used.
