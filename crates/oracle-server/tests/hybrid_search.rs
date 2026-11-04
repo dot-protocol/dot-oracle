@@ -293,3 +293,63 @@ fn hybrid_total_does_not_count_keyword_hits_outside_the_first_window_twice() {
         assert_eq!(page["total"], 70, "semantic matches in the keyword tail are not extra matches, offset={offset}");
     }
 }
+
+/// Synonyms for meaning, and a reranker that scores a passage by how often it says "answer" (or fails, for the control).
+struct Ranks(bool);
+impl Embedder for Ranks {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Synonyms.embed(texts)
+    }
+    fn model(&self) -> &str {
+        "ranks"
+    }
+    fn reranks(&self) -> bool {
+        true
+    }
+    fn rerank(&self, _: &str, docs: &[String], _: std::time::Duration) -> Result<Vec<f32>, String> {
+        if !self.0 {
+            return Err("reranker unreachable: connection refused".into());
+        }
+        Ok(docs.iter().map(|d| d.matches("answer").count() as f32).collect())
+    }
+}
+
+/// The cross-encoder orders the first candidates (3 Nov 2026, the 20 real moments: on the same 100 records Oracle went from 19
+/// to 20 of 20 in the top 5, 13 to 18 first); `rerank=off` keeps the fused order; a reranker that fails keeps it and says so; a
+/// mind the query names joins the fusion with its own words.
+#[test]
+fn the_reranker_orders_the_first_candidates_and_a_named_mind_adds_its_own_words() {
+    use oracle_server::store::{Ranker, Tuning, SEARCH_TUNING};
+    let dir = tempfile::tempdir().unwrap();
+    let (s, path) = oracle(dir.path());
+    let strong = say(&s, "astra", "rocky", 2, "lattice lattice lattice bootstrap lattice", 0);
+    let quiet = say(&s, "astra", "rocky", 2, "a long note; somewhere in it the lattice, and the answer answer answer", 1);
+    for i in 0..20 {
+        say(&s, "ops", "dinesh", 3, &format!("dinesh writes about deploys, note {i}"), 2 + i);
+    }
+    let theirs = say(&s, "ops", "dinesh", 3, "the lattice deploy goes out on thursday", 30);
+    let sem = Semantic::open(dir.path().join("vec.db").to_str().unwrap(), Box::new(Ranks(true))).unwrap();
+    sem.index_pass(&path, 100).unwrap();
+    let order = |q: &str, sem: &Semantic, rerank: Option<&str>| {
+        SEARCH_TUNING.with(|t| *t.borrow_mut() = Tuning::parse(None, None).with_rerank(rerank));
+        let (hits, engine) = s.search_in(q, None, None, 10, Some(sem), Ranker::Rrf, false).unwrap();
+        (hits.into_iter().map(|h| h.obs.id).collect::<Vec<_>>(), engine)
+    };
+    let (fused, engine) = order("lattice", &sem, Some("off"));
+    assert_eq!(fused.first(), Some(&strong), "control: the words put the strong match first ({engine})");
+    assert!(!engine.contains("reranked"));
+    let (reranked, engine) = order("lattice", &sem, None);
+    assert_eq!(reranked.first(), Some(&quiet), "the reranker puts the answer first: {engine}");
+    assert!(engine.contains("reranked"), "{engine}");
+    let down = Semantic::open(dir.path().join("vec2.db").to_str().unwrap(), Box::new(Ranks(false))).unwrap();
+    down.index_pass(&path, 100).unwrap();
+    let (kept, engine) = order("lattice", &down, None);
+    assert_eq!(kept.first(), Some(&strong), "a failed reranker keeps the fused order");
+    assert!(engine.contains("rerank unavailable: reranker unreachable"), "{engine}");
+    let (_, engine) = order("what did dinesh say about the lattice", &sem, Some("off"));
+    assert!(engine.contains("their own words (dinesh)"), "dinesh has 21 signed records: {engine}");
+    let (found, _) = order("what did dinesh say about the lattice", &sem, Some("off"));
+    assert!(found.iter().take(3).any(|i| i == &theirs), "{found:?}");
+    let (_, engine) = order("what did rocky say about the lattice", &sem, Some("off"));
+    assert!(!engine.contains("their own words"), "rocky has 2 records, under the 20 a mind needs: {engine}");
+}

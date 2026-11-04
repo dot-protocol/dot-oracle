@@ -158,6 +158,11 @@ if command -v node >/dev/null; then
   out=$(node examples/sign.mjs "$URL" "$(tok rocky)" "$T/web.seed" kin room "kin's key, rocky's token" 2>&1 || true)
   echo "$out" | grep >/dev/null 'refused (403)' \
     && ok "…and still cannot use another seat's token" || die "token/seat binding failed for the Node signer"
+  # the TypeScript SDK (sdk/typescript): its signer against the golden vector, then the whole client against this server
+  (cd sdk/typescript && node --test test/golden.test.mjs >"$T/sdk-golden.log" 2>&1) \
+    && ok "the TypeScript SDK signs the golden vector byte for byte" || { cat "$T/sdk-golden.log"; die "the TypeScript SDK and oracle-proto disagree"; }
+  (cd sdk/typescript && ORACLE_URL="$URL" ORACLE_TOKEN="$(tok kin)" ORACLE_SEED_FILE="$T/web.seed" ORACLE_ROOM=sdk node test/live.mjs) | grep >/dev/null 'signed:ok' \
+    && ok "the TypeScript SDK writes, reads, threads, supersedes, recalls and remembers; a forged author is refused" || die "the TypeScript SDK failed against the server"
 fi
 
 # the MCP door: same seat, same signature, same rules

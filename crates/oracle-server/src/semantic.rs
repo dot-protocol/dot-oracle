@@ -38,7 +38,20 @@ pub trait Embedder: Send + Sync {
         let _ = budget;
         self.embed(&[text.to_string()])?.pop().ok_or_else(|| "no query vector".to_string())
     }
+    /// Whether [`Embedder::rerank`] is configured (`ORACLE_RERANK_URL`).
+    fn reranks(&self) -> bool {
+        false
+    }
+    /// One relevance score per document for `query`, higher is better: oracle-embed's cross-encoder (`/api/rerank`).
+    fn rerank(&self, query: &str, docs: &[String], budget: Duration) -> Result<Vec<f32>> {
+        let _ = (query, docs, budget);
+        Err("no reranker configured".into())
+    }
 }
+
+/// How long a search waits for the reranker before keeping the fused order (measured 3 Nov 2026 on core: 30 passages of
+/// about 50 words in 2.2 s on 8 threads).
+pub const RERANK_BUDGET: Duration = Duration::from_millis(6000);
 
 /// How long a search waits for its query's vector before answering by words alone (2026-10-10: the CPU embedder took
 /// 1.2 s per query, 10-20 s behind indexing backlogs, and seats' tools timed out with nothing).
@@ -53,6 +66,8 @@ pub struct Ollama {
     /// loaded (2026-10-10: through Ollama a query paid ~0.5-1 s of setup per request and waited behind the indexer's
     /// batches; the same vectors, cosine 0.99999, come from oracle-embed in ~0.3-0.5 s).
     pub query_url: Option<String>,
+    /// oracle-embed's `/api/rerank` (`ORACLE_RERANK_URL`), when a cross-encoder is loaded there.
+    pub rerank_url: Option<String>,
 }
 
 // keep_alive: Ollama unloads an idle model after 5 minutes, which would make the first search after a quiet
@@ -70,6 +85,23 @@ impl Embedder for Ollama {
         let body = serde_json::json!({"model": self.model, "input": [text], "truncate": false,
                                       "options": {"num_ctx": 8192}, "keep_alive": "24h"});
         self.post_to(self.query_url.as_deref().unwrap_or(&self.url), body, budget, 1)?.pop().ok_or_else(|| "no query vector".to_string())
+    }
+    fn reranks(&self) -> bool {
+        self.rerank_url.is_some()
+    }
+    fn rerank(&self, query: &str, docs: &[String], budget: Duration) -> Result<Vec<f32>> {
+        let url = self.rerank_url.as_deref().ok_or("no reranker configured")?;
+        let resp = ureq::post(url).timeout(budget).send_json(serde_json::json!({"query": query, "documents": docs}))
+            .map_err(|e| match e {
+                ureq::Error::Status(code, r) => format!("reranker {code}: {}", r.into_string().unwrap_or_default()),
+                other => format!("reranker unreachable: {other}"),
+            })?;
+        let v: serde_json::Value = resp.into_json().map_err(|e| format!("reranker reply: {e}"))?;
+        let scores: Vec<f32> = v["scores"].as_array().ok_or("reranker reply has no scores")?.iter().map(|x| x.as_f64().unwrap_or(f64::MIN) as f32).collect();
+        if scores.len() != docs.len() {
+            return Err(format!("reranker returned {} scores for {} documents", scores.len(), docs.len()));
+        }
+        Ok(scores)
     }
 }
 
@@ -314,6 +346,7 @@ impl Semantic {
             model: std::env::var("ORACLE_EMBED_MODEL")
                 .unwrap_or_else(|_| "snowflake-arctic-embed2".into()),
             query_url: std::env::var("ORACLE_EMBED_QUERY_URL").ok().filter(|u| !u.trim().is_empty()),
+            rerank_url: std::env::var("ORACLE_RERANK_URL").ok().filter(|u| !u.trim().is_empty()),
         };
         match Semantic::open(&path, Box::new(embedder)) {
             Ok(s) => Some(Arc::new(s)),
@@ -355,6 +388,16 @@ impl Semantic {
     }
 
     /// Best `k` observations by meaning for a search query.
+    /// Whether search can rerank its candidates (`ORACLE_RERANK_URL`).
+    pub fn reranks(&self) -> bool {
+        self.embedder.reranks()
+    }
+
+    /// One relevance score per document for `q` from the cross-encoder, within [`RERANK_BUDGET`].
+    pub fn rerank(&self, q: &str, docs: &[String]) -> Result<Vec<f32>> {
+        self.embedder.rerank(q, docs, RERANK_BUDGET)
+    }
+
     pub fn query(&self, q: &str, k: usize) -> Result<Vec<(i64, f32)>> {
         let v = self.query_vector(q)?;
         Ok(self.index.read().map_err(|_| "index poisoned")?.top(&v, k))
@@ -397,6 +440,12 @@ impl Semantic {
 
     pub fn windows_loaded(&self) -> usize {
         self.index.read().map(|i| i.seqs.len()).unwrap_or(0)
+    }
+
+    /// The highest record seq the index holds: what a room page compares its newest record against ("N not yet in
+    /// meaning search"). None while nothing is loaded.
+    pub fn indexed_through(&self) -> Option<i64> {
+        self.index.read().ok().and_then(|i| i.seqs.iter().copied().max())
     }
 
     /// Embed every window of one observation; a window the embedder refuses is split and retried.

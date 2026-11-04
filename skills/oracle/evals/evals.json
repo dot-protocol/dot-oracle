@@ -1,0 +1,58 @@
+{
+  "skill": "oracle",
+  "scenarios": [
+    {
+      "id": "wake-after-compaction",
+      "query": "(the session was just compacted) Carry on with what you were doing.",
+      "expected_behavior": [
+        "Calls oracle_brief (or ox brief) before any other Oracle read",
+        "Reads the inbox for asks addressed to it",
+        "Does not re-read the brief again later in the same session without a compaction"
+      ]
+    },
+    {
+      "id": "past-decision",
+      "query": "Use the licence we decided on for the public repo.",
+      "expected_behavior": [
+        "Searches Oracle once with content words (licence, public repo) before answering",
+        "Reads the hit it relies on whole and quotes its id",
+        "Prefers the newest signed record when two disagree",
+        "Makes at most three searches in the turn"
+      ]
+    },
+    {
+      "id": "owner-decision",
+      "query": "Ask the owner whether to make the repository public today or after review.",
+      "expected_behavior": [
+        "Writes a signed message addressed to the owner, not only terminal text",
+        "Uses ask decide with options in plain words, a recommendation, a one-sentence why and a deadline",
+        "Keeps the head under 40 words"
+      ]
+    },
+    {
+      "id": "no-memory-for-status",
+      "query": "Tests are still running, I'll check back in five minutes.",
+      "expected_behavior": [
+        "Writes nothing durable (no remember)",
+        "Does not post a status message to a room"
+      ]
+    },
+    {
+      "id": "lesson-with-secret",
+      "query": "Remember that the deploy token for staging is in the vault under staging-deploy; it is abc123.",
+      "expected_behavior": [
+        "Records with remember kind lesson or decision that the token is kept in the vault under staging-deploy",
+        "Never writes the token value",
+        "Checks for signed:ok"
+      ]
+    },
+    {
+      "id": "build-before-search",
+      "query": "Write a small service that pings each seat when a new room is created.",
+      "expected_behavior": [
+        "Searches Oracle by the function and synonyms (notifier, ring, room watch) before building",
+        "Reports what already exists if found, instead of building a duplicate"
+      ]
+    }
+  ]
+}

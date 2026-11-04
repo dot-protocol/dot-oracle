@@ -7,6 +7,8 @@
 //!
 //! A minted token is written to a new file, mode 0600, and only its path is printed (`token_file`).
 
+mod up;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use oracle_proto::{keyfile, pubkey_hex, Envelope, KeyAction, KeyEvent, Kind};
@@ -26,7 +28,9 @@ struct Cli {
     /// Directory holding oracle.db and keys/.
     #[arg(long, env = "ORACLE_HOME", global = true, default_value = "./data")]
     home: PathBuf,
-    /// Seat/token administration against an initialized live store, without startup migrations or reindexing.
+    /// Seat/token administration and the retention sweep against an initialized live store, without startup migrations or
+    /// reindexing (4 Nov 2026: the hourly sweep opened the store whole, restarted the FTS shadow rebuild under the serving
+    /// writer every hour and held the write lock long enough that live writes answered 503).
     #[arg(long, global = true)]
     online_admin: bool,
     #[command(subcommand)]
@@ -43,6 +47,37 @@ enum Cmd {
         /// Where the owner's token is written (a new file, mode 0600). Default: keys/<owner>.token.
         #[arg(long)]
         token_file: Option<PathBuf>,
+    },
+    /// One command from nothing to a working Oracle with your agents connected (src/up.rs): owner key, an agent seat, the server as a
+    /// per-user service, ox, then each agent found here over MCP. Shows the plan and asks first; --plan changes nothing.
+    /// Its home is ~/.oracle-node unless --home or ORACLE_HOME says otherwise.
+    Up {
+        /// Your handle (default: your login name).
+        #[arg(long)]
+        owner: Option<String>,
+        /// The seat your agents speak as.
+        #[arg(long, default_value = "agent")]
+        seat: String,
+        #[arg(long, default_value = "127.0.0.1:8900")]
+        bind: String,
+        /// Which agents to connect: auto (default: every one found), none, or a list of claude-code, codex, cursor.
+        #[arg(long, value_delimiter = ',')]
+        agents: Vec<String>,
+        /// Do it without asking.
+        #[arg(long)]
+        yes: bool,
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        plan: bool,
+        /// Do not install the per-user service (you run `oracle serve` yourself).
+        #[arg(long)]
+        no_service: bool,
+        /// Where ox keeps this seat (default: OX_HOME or ~/.oracle). Never overwritten if it already holds a seat.
+        #[arg(long)]
+        ox_home: Option<PathBuf>,
+        /// Only connect the agents, to the seat a previous `oracle up` made (the retry after a failed agent step).
+        #[arg(long)]
+        agents_only: bool,
     },
     /// Serve the HTTP API.
     Serve {
@@ -387,9 +422,15 @@ fn owner_handle(store: &Store, given: Option<String>) -> Result<String> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    if cli.online_admin && !matches!(cli.cmd, Cmd::Seat { .. } | Cmd::Token { .. }) {
-        bail!("--online-admin is only for seat and token commands");
+    let mut cli = Cli::parse();
+    if cli.online_admin && !matches!(cli.cmd, Cmd::Seat { .. } | Cmd::Token { .. } | Cmd::Retention { sweep: true, .. }) {
+        bail!("--online-admin is only for seat and token commands and `retention --sweep`");
+    }
+    // `oracle up` is the stranger's first command: its home is ~/.oracle-node, not ./data in whatever folder they stood in.
+    if matches!(cli.cmd, Cmd::Up { .. }) && cli.home == Path::new("./data") && std::env::var_os("ORACLE_HOME").is_none() {
+        if let Some(h) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            cli.home = PathBuf::from(h).join(".oracle-node");
+        }
     }
     // Before the store is opened: `terms` reads two databases read-only and must not create or migrate a home.
     if let Cmd::Terms { out, top, oracle_db, chats_db } = &cli.cmd {
@@ -402,6 +443,12 @@ fn main() -> Result<()> {
             ["generated_at", "seconds", "documents", "stores"].iter().map(|k| (k.to_string(), v[*k].clone())).collect();
         println!("{}", serde_json::Value::Object(head));
         return Ok(());
+    }
+    // Before the store is opened: `oracle up` plans from a read-only look and creates the home only after a yes (src/up.rs).
+    if let Cmd::Up { owner, seat, bind, agents, yes, plan, no_service, ox_home, agents_only } = cli.cmd {
+        let home = cli.home.clone();
+        let db = PathBuf::from(db_path(&home));
+        return up::run(&home, &db, |h| key_path(&home, h), up::Up { owner, seat, bind, agents, yes, plan, no_service, ox_home, agents_only });
     }
     // A server pointed at a home that was never initialised would create an empty database with no owner and answer
     // healthy, and every token would then fail (measured 1 Nov 2026: a launchd or systemd unit naming another ORACLE_HOME
@@ -437,6 +484,7 @@ fn main() -> Result<()> {
     let err = |e: oracle_server::store::StoreError| anyhow::anyhow!(e.to_string());
 
     match cli.cmd {
+        Cmd::Up { .. } => unreachable!("handled before the store is opened"),
         Cmd::Init { owner, token_file: given } => {
             let reserved = TokenFile::reserve(&cli.home, &owner, given)?;
             let path = key_path(&cli.home, &owner);

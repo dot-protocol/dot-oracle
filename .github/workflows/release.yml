@@ -9,7 +9,7 @@ on:
     tags: ["v*"]
     # A change to how dotOracle installs is proved on every platform the moment it lands (nothing publishes from a branch).
     branches: [dev]
-    paths: [".github/workflows/release.yml", "scripts/install.sh", "scripts/install.ps1", "scripts/smoke-install.sh", "scripts/smoke-install.ps1"]
+    paths: [".github/workflows/release.yml", "scripts/install.sh", "scripts/install.ps1", "scripts/smoke-install.sh", "scripts/no-phone-home.sh", "scripts/smoke-install.ps1", "scripts/installer-edges.sh", "scripts/installer-edges.ps1"]
   workflow_dispatch:
 permissions: { contents: write }
 jobs:
@@ -70,6 +70,27 @@ jobs:
           python3 -m http.server 8765 --bind 127.0.0.1 --directory dist > /dev/null 2>&1 &
           sleep 2
           ORACLE_DOWNLOAD_BASE="http://127.0.0.1:8765" HOME="$(mktemp -d)" sh dist/smoke-install.sh
+      - name: the installer's edges (macOS, Linux; plan.oracle.everyone J7)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh scripts/installer-edges.sh dist
+          if INSTALLER_EDGES_CONTROL=1 sh scripts/installer-edges.sh dist; then
+            echo "the negative control passed, so the test cannot see an install it should have refused" >&2; exit 1
+          fi
+      - name: no phone home (Linux; Blaze, 4 Nov 2026, before v0.1.0)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get install -y strace > /dev/null
+          python3 -m http.server 8766 --bind 127.0.0.1 --directory dist > /dev/null 2>&1 &
+          sleep 2
+          export HOME="$(mktemp -d)"
+          ORACLE_DOWNLOAD_BASE="http://127.0.0.1:8766" sh dist/install.sh
+          sudo ORACLE_BIN_DIR="$HOME/.local/bin" sh scripts/no-phone-home.sh
+          if sudo NO_PHONE_HOME_CONTROL=1 ORACLE_BIN_DIR="$HOME/.local/bin" sh scripts/no-phone-home.sh; then
+            echo "the negative control passed, so the test cannot see an outbound connect" >&2; exit 1
+          fi
       - name: the README install and first minute (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -80,6 +101,15 @@ jobs:
           Start-Sleep 3
           $env:ORACLE_DOWNLOAD_BASE = 'http://127.0.0.1:8765'
           ./dist/smoke-install.ps1
+      - name: the installer's edges (Windows; plan.oracle.everyone J7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/installer-edges.ps1 dist
+          $env:INSTALLER_EDGES_CONTROL = '1'
+          $failed = $false
+          try { ./scripts/installer-edges.ps1 dist } catch { $failed = $true; Write-Host "control failed as it must: $_" }
+          if (-not $failed) { throw 'the negative control passed, so the test cannot see an install it should have refused' }
 
   publish:
     needs: smoke

@@ -41,8 +41,8 @@ export ORACLE_HOME="$HOME/.oracle-server"      # where oracle.db and keys/ live
 oracle init --owner <owner-handle>
 ```
 
-This prints the owner's public key, the path of the owner key file, and an admin token
-**once**. Do all three of these now:
+This prints the owner's public key, the path of the owner key file, and the path of an
+admin token file (mode 0600). The token itself is never printed. Do all three of these now:
 
 1. Tell your human where the owner key file is and that it must be backed up. It is the
    root of trust; whoever holds it controls the Oracle. Never paste its contents anywhere.

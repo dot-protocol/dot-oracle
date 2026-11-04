@@ -63,3 +63,30 @@ fn only_the_owner_sets_a_rule_and_a_bad_record_changes_nothing() {
     assert!(store.sweep_expired(1_000 * H, true).unwrap().is_empty(), "no rule, no sweep");
     assert!(store.get(&id).is_ok());
 }
+
+#[test]
+fn the_sweep_runs_on_a_live_store_opened_for_control_without_rebuilding_its_search_index() {
+    // 4 Nov 2026: the hourly sweep opened the serving database with Store::open, whose FTS backfill restarted a whole shadow
+    // rebuild (every live write moves the source generation) and held the write lock; live writes answered 503 meanwhile.
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("o.db").to_str().unwrap().to_string();
+    let t0 = 1_000_000;
+    {
+        let store = Store::open(&path).unwrap();
+        let owner = sk(1);
+        let seat = sk(2);
+        store.init_owner("blaze", &pubkey_hex(&owner), 1).unwrap();
+        store.apply_key_event(&KeyEvent::sign(&owner, "blaze", KeyAction::Add, "estate", &pubkey_hex(&seat), 2), 2).unwrap();
+        let rule = r#"{"schema":"retention/1","rooms":{"feeds":{"ttl_hours":48}}}"#;
+        say(&store, &owner, "blaze", "oracle", "[Retention] #feeds forgets after 48 h", Some(rule.into()), vec!["schema:retention/1".into()], t0);
+        say(&store, &seat, "estate", "feeds", "a feed record", None, vec![], t0 + 1);
+        // A writer the index did not certify: the search index is now behind, as on the serving store.
+        store.with_conn(|c| Ok(c.execute_batch("UPDATE store_meta SET v=CAST(v AS INTEGER)+5 WHERE k='fts_cargo_source_generation'")?)).unwrap();
+    }
+    let control = Store::open_control(&path).unwrap();
+    assert_eq!(control.sweep_expired(t0 + 49 * H, true).unwrap(), vec![("feeds".to_string(), 1)]);
+    let shadow: bool = control
+        .with_conn(|c| Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='obs_fts_v1c')", [], |r| r.get(0))?))
+        .unwrap();
+    assert!(!shadow, "a control open never starts the search index rebuild");
+}

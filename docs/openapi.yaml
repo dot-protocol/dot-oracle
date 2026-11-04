@@ -122,6 +122,8 @@ paths:
         - { name: include, in: query, schema: { type: string }, description: 'with id: envelope, source' }
         - { name: q, in: query, schema: { type: string }, description: 'ranked full-text search' }
         - { name: by_room, in: query, schema: { type: boolean }, description: 'with q: also rooms, every room with a keyword match, its count and first/last date, most first' }
+        - { name: as_of, in: query, schema: { type: string }, description: 'with q: as of a moment (a date through its end, a date and time, or unix ms): only what was written by then, validity judged then; hits carry valid_until and invalid_since (docs/SEARCH.md "Valid in time")' }
+        - { name: rerank, in: query, schema: { type: string, enum: [off] }, description: 'with q: off keeps the fused order when a cross-encoder is configured (ORACLE_RERANK_URL)' }
         - { name: about, in: query, schema: { type: string }, description: 'comma-separated names of one thing; needs channel' }
         - { name: channel, in: query, schema: { type: string }, description: 'one room' }
         - { name: kind, in: query, schema: { type: string }, description: 'say, state or memory' }
@@ -223,6 +225,47 @@ paths:
       parameters:
         - { name: name, in: path, required: true, schema: { type: string, maxLength: 160 }, description: 'exact entity title or alias' }
       responses: { '200': { description: 'charter, positions with by/about attribution, connections, last_seen, open_questions and primer' }, '401': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /cortex/law:
+    get:
+      tags: [read]
+      summary: 'cortex-law/1: what Blaze approved and labelled Rule, Profile or Preference, one line each, the readings most linked to first, then the newest; every brief reads it.'
+      parameters:
+        - { name: top, in: query, schema: { type: integer, minimum: 0 }, description: 'keep the first n lines; total says how many there are' }
+      responses: { '200': { description: 'total, shown, labels, lines [{code, nid, labels, line, linked, minted_ms, approval}]' }, '401': { $ref: '#/components/responses/Error' } }
+  /minds:
+    get:
+      tags: [read]
+      summary: 'minds/1: every mind (person or agent) ranked by how many records it wrote, with its newest record''s seq and time.'
+      responses: { '200': { description: 'total, minds [{handle, records, last_seq, last_ms}]' }, '401': { $ref: '#/components/responses/Error' } }
+  /minds/{handle}:
+    get:
+      tags: [read]
+      summary: 'mind-statements/1: what one mind said (say and memory, not reactions or task heads), newest first, under the reader''s visibility.'
+      parameters:
+        - { name: handle, in: path, required: true, schema: { type: string, maxLength: 64 } }
+        - { name: before, in: query, schema: { type: integer }, description: 'seq cursor: statements older than this' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
+      responses: { '200': { description: 'handle, statements [{id, seq, room, kind, created_ms, text, tags}], next' }, '401': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /answerable:
+    get:
+      tags: [read]
+      summary: 'answerable/1: whether Oracle can answer a question, before recall. yes (every content word on record and an approved reading answers it), partial (some of it on record, or nothing approved), no. No model is asked; the caller''s hidden rooms are left out of every count.'
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: room, in: query, schema: { type: string }, description: 'one room; the graph is left out' }
+      responses: { '200': { description: 'verdict, says, next, words [{word, records, approved}], missing, all_words {records, capped, approved, others}, graph {nodes [{title, certification, approved, readings}], form, records, reached, unnamed}' }, '401': { $ref: '#/components/responses/Error' } }
+  /extract:
+    post:
+      tags: [write]
+      summary: 'extract/1: the decisions, lessons, preferences and commitments in a session''s text, by the local model this server names (ORACLE_EXTRACT_URL, ORACLE_EXTRACT_MODEL; docs/CAPTURE.md). Stores nothing: the seat signs what it keeps (ox capture). A line the secret scan matches never reaches the model. Write scope.'
+      requestBody: { content: { application/json: { schema: { type: object, required: [text], properties: { text: { type: string, description: 'the newest 24,000 characters are read' } } } } } }
+      responses: { '200': { description: 'schema extract/1: model, memories [{kind, text, why}], dropped_lines, input_chars, ms' }, '401': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
+  /reflect:
+    post:
+      tags: [write]
+      summary: 'reflect/1: a mind''s recent memories and its current observations in; at most five observations out, each about one subject, citing only the memories given, naming the observation it refines (docs/REFLECT.md). Stores nothing: the mind signs what it keeps (ox reflect). Same model as /extract. Write scope.'
+      requestBody: { content: { application/json: { schema: { type: object, required: [memories], properties: { memories: { type: array, items: { type: object, properties: { id: { type: string }, text: { type: string } } } }, previous: { type: array, items: { type: object, properties: { id: { type: string }, about: { type: string }, text: { type: string } } } } } } } } }
+      responses: { '200': { description: 'schema reflect/1: model, observations [{about, text, cites, refines}], dropped_lines, ms' }, '401': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
   /cortex/marks:
     get:
       tags: [read]
@@ -376,6 +419,16 @@ paths:
         - {name: ch, in: path, required: true, schema: {type: string}}
       responses:
         '200': {description: 'room-map/1: room, written {text, head, by, at_ms} or null, computed {records, first_ms, last_ms, open_threads, seats, words, state_fields}, line'}
+  /rooms/{ch}/page:
+    get:
+      tags: [read]
+      summary: 'room-page/1 (docs/ROOM-PAGE.md): the room''s live page, composed from its records at read time, never written: freshness (newest record, today, week, meaning index through), State head, decided, being built, waiting on someone, what moved, who is here, and the newest seat reading. A room the caller may not read answers 404 like one that does not exist. Cache-Control private, no-store.'
+      parameters:
+        - {name: ch, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: 'room-page/1: room, now_ms, freshness, state, decided, building, waiting, moving, who, reading'}
+        '401': {description: No bearer token}
+        '404': {description: No such room, or one the caller may not read}
   /maps:
     get:
       tags: [read]

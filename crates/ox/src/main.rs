@@ -17,6 +17,8 @@ use std::time::Duration;
 mod manual;
 mod authority;
 mod board;
+mod capture;
+mod edit;
 mod plan;
 mod close;
 mod doorbell;
@@ -50,6 +52,9 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// The parsed command line, made once per run: a large Say (its 30-odd flags) costs nothing, and boxing it would only make every
+// match on it longer (clippy large_enum_variant, crossed when Say gained --valid-until, 3 Nov 2026).
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Read the reference or agent workflow embedded in this binary, offline.
     Manual {
@@ -97,8 +102,10 @@ enum Cmd {
         #[arg(long)]
         key: Option<PathBuf>,
     },
-    /// Connect an agent on this machine to this seat: adds `ox mcp` as its MCP server, through the agent's own
-    /// `mcp add` where it has one (Claude Code, Codex, Gemini CLI, OpenClaw), or its config file (Hermes, Cursor).
+    /// Connect an agent on this machine to this seat: writes the `oracle` skill where that agent reads skills
+    /// (skills/oracle: when to search, how to tell the owner, what to write back), then adds `ox mcp` as its MCP server,
+    /// through the agent's own `mcp add` where it has one (Claude Code, Codex, Gemini CLI, OpenClaw), or its config
+    /// file (Hermes, Cursor).
     Connect {
         #[arg(value_enum)]
         agent: join::Agent,
@@ -213,6 +220,10 @@ enum Cmd {
         /// Structured data signed with the message: JSON text, or `@path` to read it from a file.
         #[arg(long)]
         cargo: Option<String>,
+        /// Until when this holds: a date (through its end), a date and time, or a span (30d, 12h) (adds valid-until:<unix ms>;
+        /// docs/SEARCH.md "Valid in time").
+        #[arg(long)]
+        valid_until: Option<String>,
     },
     /// Mark rooms read without listing them: name the rooms, or `--all` for every room (nothing named refuses).
     #[command(hide = true)]
@@ -424,6 +435,10 @@ enum Cmd {
         /// now, active projects, key decisions, active seats, open questions; the same text oracle_brief where=world prints.
         #[arg(long = "where", value_name = "me|world")]
         place: Option<String>,
+        /// Printed for an agent's session-start hook (docs/CAPTURE.md): cursor wants JSON (`additional_context`); Claude Code
+        /// and Codex take the text as it is.
+        #[arg(long, value_name = "claude-code|codex|cursor")]
+        hook: Option<String>,
     },
     /// The waking read (Blaze, 1 Nov 2026: food for an agent is the diff between the world's last known state and its
     /// current state): what changed since my last RESUME, or --since an OBS id, a time (2026-10-31T08:00, UTC) or a span
@@ -516,6 +531,10 @@ enum Cmd {
         kind: String,
         #[arg(long, default_value = "memory")]
         room: String,
+        /// Until when this holds: a date (through its end), a date and time, or a span (30d, 12h). After it, recall ranks it
+        /// as a replaced fact and says since when (adds valid-until:<unix ms>; docs/SEARCH.md "Valid in time").
+        #[arg(long)]
+        valid_until: Option<String>,
     },
     /// Search everything.
     Recall {
@@ -538,6 +557,10 @@ enum Cmd {
         /// The words that matter across the Oracle, ranked, refreshed hourly (was `ox terms`).
         #[arg(long)]
         terms: bool,
+        /// Instead of hits, a cheap check before recall: can Oracle answer this? yes, partial or no, the words on record and
+        /// not, and what is approved (GET /answerable).
+        #[arg(long)]
+        answerable: bool,
         /// Run a frozen query set (JSONL: q, expect, none) against search and score it (was `ox eval`).
         #[arg(long)]
         eval: Option<PathBuf>,
@@ -550,6 +573,10 @@ enum Cmd {
         /// Search the archived rooms and expired records too (docs/ARCHIVE.md); off, the answer says what it left out.
         #[arg(long = "include-archived")]
         include_archived: bool,
+        /// As of a moment: only what was written by then, and what still held then (a date through its end, or a date and
+        /// time; docs/SEARCH.md "Valid in time").
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
     },
     /// Run a frozen query set (JSONL: q, expect, none) against search: per query the rank of the right observation and
     /// how the answer reads (bytes, duplicates, synthetic and noisy hits, edges, "no prior"), then hit@k, MRR and latency.
@@ -610,6 +637,20 @@ enum Cmd {
         /// Who is live, idle, gone or retired: last seen, calls, last route (was `ox presence`).
         #[arg(long)]
         live: bool,
+        /// Write the key file a reader needs to check records with no server (`oracle-keys/1`, docs/VERIFY.md): the
+        /// owner key and every signed key event. Publish it where readers can fetch it.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["history", "live"])]
+        export: Option<PathBuf>,
+    },
+    /// Check records with no server at all (docs/VERIFY.md): replay the key file's log from the owner key, then check
+    /// each record of a face (`ox chain --out`) against the key its author held when it signed. Pin the owner key with
+    /// --owner-key (from the owner's published page); without it, the key inside the file is trusted and the report says so.
+    Verify {
+        face: PathBuf,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long, value_name = "HEX")]
+        owner_key: Option<String>,
     },
     /// Every room: how many messages, when it last spoke, newest first (`GET /channels`).
     #[command(hide = true)]
@@ -646,6 +687,14 @@ enum Cmd {
         /// Any of the words, not all of them.
         #[arg(long)]
         any: bool,
+    },
+    /// Can Oracle answer this, before recall (= oracle_recall answerable): yes, partial or no.
+    #[command(hide = true)]
+    Answerable {
+        #[arg(required = true)]
+        words: Vec<String>,
+        #[arg(long)]
+        room: Option<String>,
     },
     /// The words that matter across the Oracle and the Time Machine, ranked, refreshed hourly (= oracle_terms).
     #[command(hide = true)]
@@ -745,6 +794,65 @@ enum Cmd {
     /// Rename a record's type address: writes retype:<id> and type:<addr> in the record's room. Only the record's own
     /// author renames it; anyone else's retype is kept as a proposal, and every one stays in the ledger.
     Retype { id: String, addr: String },
+    /// Edit a record in place (Blaze, 3 Nov 2026: the competitor map's editable-memory row; docs/EDIT.md): a new record in
+    /// the same room, of the same kind, that supersedes it; the old one is kept, read whole by id, and ranks under the new one
+    /// in recall. A seat edits its own records; the owner edits any. The new text is --text, --file, or $EDITOR on the old.
+    /// Capture a coding agent's session as memories (docs/CAPTURE.md; the competitor map's agent-adapters and session-extraction
+    /// rows, 4 Nov 2026). `--hook <agent>` is what an agent's hook runs: it spools the session and returns at once. `--drain`
+    /// reads each spooled transcript from where the last capture stopped, asks the Oracle's /extract for the decisions,
+    /// lessons, preferences and commitments in it, and signs each as this seat's memory. `--file` captures one transcript by
+    /// hand; `--dry-run` prints what would be kept and writes nothing.
+    Capture {
+        #[arg(long, value_name = "claude-code|codex|cursor", conflicts_with_all = ["drain", "file"])]
+        hook: Option<String>,
+        #[arg(long, conflicts_with = "file")]
+        drain: bool,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// With --file: the agent that wrote the transcript.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+        /// The room the memories go to.
+        #[arg(long, default_value = "memory")]
+        room: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Reflect (docs/REFLECT.md): an Oracle has one reflector, not one per agent (Blaze, 4 Nov 2026: 'there should only be
+    /// one, Pythia, which would be doing it for all of oracle'). Every seat's memories in each room that came since the last
+    /// reflection, oldest first, go to the Oracle's /reflect with the reflector's current observations. Each observation that
+    /// comes back is signed as the reflector's memory in that same room (`reflection`, `observation:<subject>`, a `ref:` for
+    /// each memory it rests on); one that refines an earlier observation supersedes it, and the earlier one is kept. Run it
+    /// nightly as the reflector, or by hand; --dry-run prints what it would write and writes nothing.
+    Reflect {
+        /// The rooms to reflect on, each on its own: observations stay in the room their memories came from. `all` is every
+        /// room in one pass.
+        #[arg(long, default_value = "memory", value_delimiter = ',')]
+        room: Vec<String>,
+        /// Authors whose memories are left out: automated feeds that write memories but are not minds.
+        #[arg(long, value_delimiter = ',')]
+        except: Vec<String>,
+        /// Memories read in one call to /reflect.
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
+        /// Calls a room gets in one run; what is left waits for the next run.
+        #[arg(long, default_value_t = 4)]
+        batches: usize,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Edit {
+        id: String,
+        /// The new text.
+        #[arg(long, conflicts_with = "file")]
+        text: Option<String>,
+        /// The new text, read from a file.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Why it changed, in one line (cargo `edit.why`).
+        #[arg(long)]
+        why: Option<String>,
+    },
     /// One subject's state, read from the record instead of remembered (Blaze, 2026-09-30: "nothing should be
     /// guessed"): who holds it now, in what state, and every revision by every seat, oldest first — who created it,
     /// who moved it, who closed it and why. `ox head policy.p1`
@@ -1163,12 +1271,23 @@ enum Cmd {
     /// history kept; `ox plan <room> <name>` prints the newest revision and its history. The head's state follows
     /// the steps: every step done or dropped = done, any step doing = running, else open.
     Plan {
-        room: String,
-        name: String,
+        #[arg(required_unless_present = "pipeline")]
+        room: Option<String>,
+        #[arg(required_unless_present = "pipeline")]
+        name: Option<String>,
         #[arg(long)]
         write: Option<PathBuf>,
         #[arg(long)]
         step: Option<String>,
+        /// A step's place in the one pipeline across every plan, 1 first: `--rank S2=3`; `S2=` clears it.
+        #[arg(long)]
+        rank: Option<String>,
+        /// What a step waits on: `--after S2=S1,plan.oracle.search:T14`; `S2=` clears it. A circle is refused.
+        #[arg(long)]
+        after: Option<String>,
+        /// Every open step of every plan, ranked steps first, each with its owner and what it still waits on.
+        #[arg(long)]
+        pipeline: bool,
         /// The revision's note (default: the plan's title and its counts)
         #[arg(long)]
         note: Option<String>,
@@ -2648,6 +2767,17 @@ fn record_tag(v: &Value, prefix: &str) -> Option<String> {
     record_object(v)?["tags"].as_array()?.iter().filter_map(|t| t.as_str()).find_map(|t| t.strip_prefix(prefix)).map(str::to_string)
 }
 
+/// `valid-until:<unix ms>` from a date (through its end), a date and time, or a span from now (30d, 12h, 90m): when a fact stops
+/// holding (docs/SEARCH.md "Valid in time").
+fn valid_until_tag(s: &str) -> Result<String> {
+    let ms = oracle_proto::parse_when(s)
+        .filter(|_| !s.trim().ends_with(['d', 'h', 'm']))
+        .map(Ok)
+        .unwrap_or_else(|| oracle_mcp::parse_by(s))
+        .with_context(|| format!("--valid-until {s:?}: a date (2026-12-31), a date and time (2026-12-31T18:00) or a span (30d, 12h)"))?;
+    Ok(format!("valid-until:{ms}"))
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -2912,6 +3042,53 @@ impl Ox {
 }
 
 /// Print a chain check (docs/CHAIN.md); a chain with a break exits non-zero.
+/// `ox verify` (docs/VERIFY.md): records checked with the key file alone; no seat, no config, no server.
+fn verify_cmd(face: &Path, keys: &Path, owner_key: Option<&str>, json: bool) -> Result<()> {
+    let file: oracle_proto::offline::KeysFile = serde_json::from_str(&std::fs::read_to_string(keys)?).with_context(|| format!("{} is not an oracle-keys/1 file", keys.display()))?;
+    if file.schema != oracle_proto::offline::KEYS_SCHEMA {
+        bail!("{} is {}, not {}", keys.display(), file.schema, oracle_proto::offline::KEYS_SCHEMA);
+    }
+    let pinned = owner_key.map(str::trim).map(str::to_lowercase);
+    if let Some(pk) = &pinned {
+        if *pk != file.owner_pubkey {
+            bail!("the key file hangs from {}, not the owner key you pinned ({pk}): it is not this owner's log", file.owner_pubkey);
+        }
+    }
+    let book = oracle_proto::offline::replay(&file.owner, &file.owner_pubkey, &file.events).map_err(|e| anyhow!("the key log does not replay: {e}"))?;
+    let mut recs = Vec::new();
+    for (n, line) in std::fs::read_to_string(face)?.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        recs.push(serde_json::from_str::<oracle_proto::ChainRecord>(line).map_err(|e| anyhow!("{} line {}: {e}", face.display(), n + 1))?);
+    }
+    let r = oracle_proto::offline::verify_records(&book, &recs);
+    if json {
+        println!("{}", json!({"report": r, "owner": file.owner, "owner_pubkey": file.owner_pubkey, "owner_pinned": pinned.is_some(), "key_events": file.events.len()}));
+    } else {
+        println!("verify  {} records · {} verified · {} failed · key log {} events from owner {}", r.records, r.verified, r.failures.len(), file.events.len(), file.owner);
+        for f in &r.failures {
+            println!("FAIL    {}  {}", f.id, f.why);
+        }
+        if pinned.is_none() {
+            println!("note    the owner key was taken from the key file itself; pin it with --owner-key <hex> from the owner's published page");
+        }
+        if r.failures.is_empty() {
+            println!("whole: every signature verifies, every id matches, and every key was its author's when it signed; no server was asked");
+        }
+    }
+    if !r.failures.is_empty() {
+        bail!("{} record(s) did not verify", r.failures.len());
+    }
+    Ok(())
+}
+
+/// One face file (`ox chain --out`, docs/CHAIN.md), read whole.
+fn read_face(path: &Path) -> Result<Vec<oracle_proto::ChainRecord>> {
+    let mut recs = Vec::new();
+    for (n, line) in std::fs::read_to_string(path)?.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        recs.push(serde_json::from_str::<oracle_proto::ChainRecord>(line).map_err(|e| anyhow!("{} line {}: {e}", path.display(), n + 1))?);
+    }
+    Ok(recs)
+}
+
 fn chain_report(r: &oracle_proto::ChainReport, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(r)?);
@@ -3012,6 +3189,7 @@ fn fold(cmd: Cmd) -> Result<Cmd> {
         Cmd::Recall { terms: true, limit, .. } => Cmd::Terms { limit: if limit == RECALL_LIMIT { 100 } else { limit } },
         Cmd::Recall { eval: Some(set), limit, params, brief, .. } => Cmd::Eval { set, limit: if limit == RECALL_LIMIT { 10 } else { limit }, params, brief },
         Cmd::Recall { which_rooms: true, query, any, .. } => Cmd::Where { words: words_of(query), any },
+        Cmd::Recall { answerable: true, query, room, .. } => Cmd::Answerable { words: words_of(query), room },
         Cmd::Recall { newest: true, room: Some(room), query, limit, .. } => Cmd::About { room, terms: words_of(query), limit: if limit == RECALL_LIMIT { 25 } else { limit } },
         Cmd::Recall { newest: true, room: None, .. } => bail!("--newest reads one room: add --room <room>"),
         Cmd::Head { subject: None, exp: true, track, stage, q, limit, .. } => Cmd::Experiments { track, stage, q, limit: if limit == 50 { 60 } else { limit } },
@@ -3058,6 +3236,12 @@ fn run_cli(mut cli: Cli) -> Result<()> {
     cli.cmd = fold(cli.cmd)?;
     if let Cmd::Manual { topic, check } = &cli.cmd {
         return manual::run(*topic, check.as_deref(), cli.json);
+    }
+    // The offline checks need no seat, no config and no server: a stranger runs them (docs/VERIFY.md, docs/CHAIN.md).
+    match &cli.cmd {
+        Cmd::Verify { face, keys, owner_key } => return verify_cmd(face, keys, owner_key.as_deref(), cli.json),
+        Cmd::Chain { check: Some(path), .. } => return chain_report(&oracle_proto::check_chain(&read_face(path)?), cli.json),
+        _ => {}
     }
     let home = home_dir(cli.home)?;
 
@@ -3169,12 +3353,13 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 refs,
                 needs: vec![], verify: None, facets: vec![], items: vec![],
                 cargo,
+                valid_until: None,
             }
         }
         other => other,
     };
     match cmd {
-        Cmd::Manual { .. } | Cmd::Setup { .. } | Cmd::Tell { .. } | Cmd::Join { .. } | Cmd::Connect { .. } => unreachable!("handled above"),
+        Cmd::Manual { .. } | Cmd::Setup { .. } | Cmd::Tell { .. } | Cmd::Join { .. } | Cmd::Connect { .. } | Cmd::Verify { .. } | Cmd::Chain { check: Some(_), .. } => unreachable!("handled above"),
         Cmd::Doctor => doctor(&ox)?,
         Cmd::Whoami => {
             let v = ox.get("/whoami")?;
@@ -3257,6 +3442,29 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 print!("{}", views::presence_text(&v));
             }
         }
+        Cmd::Seats { export: Some(path), .. } => {
+            let reg = ox.get("/keys")?;
+            let hist = ox.get("/keys?history=true")?;
+            // The log hangs from the first owner key: a rotated owner key is a later event in the log.
+            let mut owners: Vec<&Value> = reg["keys"].as_array().into_iter().flatten().filter(|k| k["role"] == "owner").collect();
+            owners.sort_by_key(|k| k["created_ms"].as_i64().unwrap_or(i64::MAX));
+            let root = owners.first().context("the registry names no owner key")?;
+            let events: Vec<oracle_proto::KeyEvent> = serde_json::from_value(hist["events"].clone())?;
+            let file = oracle_proto::offline::KeysFile {
+                schema: oracle_proto::offline::KEYS_SCHEMA.into(),
+                owner: root["handle"].as_str().unwrap_or_default().into(),
+                owner_pubkey: root["pubkey"].as_str().unwrap_or_default().into(),
+                origin: ox.base().to_string(),
+                exported_ms: now_ms(),
+                events,
+            };
+            // Refuse to write a file that would not check: the log must replay from its own owner key.
+            oracle_proto::offline::replay(&file.owner, &file.owner_pubkey, &file.events).map_err(|e| anyhow!("the key log does not replay: {e}"))?;
+            write_durable(&path, &(serde_json::to_string_pretty(&file)? + "\n"))?;
+            if !ox.json {
+                println!("wrote {} key events, owner {} {}, to {}", file.events.len(), file.owner, file.owner_pubkey, path.display());
+            }
+        }
         Cmd::Seats { history, .. } => {
             let v = ox.get(if history { "/keys?history=true" } else { "/keys" })?;
             if ox.json {
@@ -3310,6 +3518,14 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 println!("{}", ox.get(&oracle_mcp::where_path(&query, any))?);
             } else {
                 twin(&ox, "oracle_where", json!({"query": query, "any": any}))?;
+            }
+        }
+        Cmd::Answerable { words, room } => {
+            let query = words.join(" ");
+            if ox.json {
+                println!("{}", ox.get(&oracle_mcp::answerable_path(&query, room.as_deref()))?);
+            } else {
+                twin(&ox, "oracle_recall", json!({"query": query, "room": room, "answerable": true}))?;
             }
         }
         Cmd::Terms { limit } => {
@@ -3633,6 +3849,33 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                         i["room"].as_str().unwrap_or(""), i["author"].as_str().unwrap_or(""));
                 }
             }
+        }
+        Cmd::Edit { id, text, file, why } => {
+            let target = ox.get(&format!("/search?id={}", urlencode(&id)))?;
+            let full = target["id"].as_str().context("the Oracle named no record")?.to_string();
+            let room = target["channel"].as_str().context("the record names no room")?.to_string();
+            let author = target["author"].as_str().unwrap_or("").to_string();
+            let kind = match target["kind"].as_str() {
+                Some("say") => Kind::Say,
+                Some("memory") => Kind::Memory,
+                other => anyhow::bail!("{full} is a {}; only a say or a memory is edited (a State head moves with ox task or ox plan)", other.unwrap_or("record of no kind")),
+            };
+            let me = ox.get("/whoami")?;
+            let handle = me["handle"].as_str().unwrap_or(&ox.cfg.handle).to_string();
+            anyhow::ensure!(author == handle || me["role"] == "owner",
+                "{full} is {author}'s: a seat edits only its own records, the owner any. Correct it with a reply: ox say {room} \"…\" --reply {full} --intent correction");
+            let old = target["content"].as_str().unwrap_or("").to_string();
+            let new = match (text, file) {
+                (Some(t), _) => t,
+                (None, Some(p)) => std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?,
+                (None, None) => edit::in_editor(&old)?,
+            };
+            anyhow::ensure!(new.trim() != old.trim(), "no change: nothing written");
+            let tags = edit::kept_tags(target["tags"].as_array().map(Vec::as_slice).unwrap_or(&[]), &full);
+            let old_cargo = target["cargo"].as_str().and_then(|c| serde_json::from_str::<Value>(c).ok());
+            let cargo = edit::cargo(old_cargo, &full, why.as_deref());
+            let v = ox.write(kind, &room, &new, Some(cargo.to_string()), tags)?;
+            print_written(&ox, &v, &format!("edits {full} ({})", edit::change(&old, &new)));
         }
         Cmd::Retype { id, addr } => {
             anyhow::ensure!(oracle_proto::type_addr_ok(&addr), "{addr:?} is not a type address: domain.form.topic, lowercase parts joined by dots");
@@ -3989,6 +4232,7 @@ fn run_cli(mut cli: Cli) -> Result<()> {
             cargo,
             dot,
             type_addr,
+            valid_until,
         } => {
             let mut cargo = match cargo {
                 Some(c) => {
@@ -4095,6 +4339,7 @@ fn run_cli(mut cli: Cli) -> Result<()> {
             tags.extend(ask.map(|a| format!("ask:{a}")));
             tags.extend(choice.map(|n| format!("choice:{n}")));
             tags.extend(by_ms.map(|b| format!("by:{b}")));
+            tags.extend(valid_until.as_deref().map(valid_until_tag).transpose()?);
             tags.extend(refs.into_iter().map(|r| format!("ref:{r}")));
             tags.extend(facets.into_iter().map(|f| format!("facet:{f}")));
             tags.extend(type_addr.map(|t| format!("type:{t}")));
@@ -4411,7 +4656,20 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 }
             }
         }
+        Cmd::Brief { full, hook: Some(h), .. } if h == "cursor" => {
+            // Cursor's sessionStart reads JSON; a brief that cannot be read gives the last one kept, or nothing.
+            let text = brief_with(&ox, full)
+                .or_else(|_| std::fs::read_to_string(ox.home.join("brief.cache")).map(|c| c.lines().skip(1).collect::<Vec<_>>().join("\n")))
+                .unwrap_or_default();
+            println!("{}", json!({"additional_context": text}));
+        }
         Cmd::Brief { full, .. } => brief(&ox, full)?,
+        Cmd::Capture { hook, drain, file, agent, room, dry_run } => capture_cmd(&ox, hook, drain, file, &agent, &room, dry_run)?,
+        Cmd::Reflect { room, except, limit, batches, dry_run } => {
+            for r in &room {
+                reflect_cmd(&ox, r, &except, limit.max(2), batches, dry_run)?;
+            }
+        }
         // The same object and page as the MCP tool oracle_delta (oracle-mcp delta_value / delta_render).
         Cmd::Delta { since } => {
             let v = oracle_mcp::delta_value(&ox, since.as_deref())?;
@@ -4598,13 +4856,6 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Chain { check: Some(path), .. } => {
-            let mut recs = Vec::new();
-            for (n, line) in std::fs::read_to_string(&path)?.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
-                recs.push(serde_json::from_str::<oracle_proto::ChainRecord>(line).map_err(|e| anyhow!("{} line {}: {e}", path.display(), n + 1))?);
-            }
-            chain_report(&oracle_proto::check_chain(&recs), ox.json)?;
-        }
         Cmd::Chain { seat, out, check: None } => {
             let who = seat.unwrap_or_else(|| ox.cfg.handle.clone());
             let (mut recs, mut after) = (Vec::new(), 0i64);
@@ -4667,23 +4918,29 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Remember { text, kind, room } => {
+        Cmd::Remember { text, kind, room, valid_until } => {
             const KINDS: [&str; 4] = ["decision", "lesson", "preference", "commitment"];
             if !KINDS.contains(&kind.as_str()) {
                 bail!("--kind must be one of {KINDS:?}. Status lines and dashboards are not knowledge.");
             }
+            let mut tags = vec![format!("memory:{kind}")];
+            tags.extend(valid_until.as_deref().map(valid_until_tag).transpose()?);
             let v = ox.write(
                 Kind::Memory,
                 &room,
                 &text,
                 None,
-                vec![format!("memory:{kind}")],
+                tags,
             )?;
             println!("remembered ({kind})  {}", v["id"].as_str().unwrap_or("?"));
         }
-        Cmd::Recall { query, limit, room, include_archived, .. } => {
+        Cmd::Recall { query, limit, room, include_archived, as_of, .. } => {
             let query = query.unwrap_or_default();
-            let chan = room.as_deref().map(|r| format!("&channel={}", urlencode(r))).unwrap_or_default();
+            if let Some(a) = as_of.as_deref() {
+                anyhow::ensure!(oracle_proto::parse_when(a).is_some(), "--as-of {a:?}: a date (2026-10-01), a date and time (2026-10-01T15:30) or unix ms");
+            }
+            let chan = format!("{}{}", room.as_deref().map(|r| format!("&channel={}", urlencode(r))).unwrap_or_default(),
+                as_of.as_deref().map(|a| format!("&as_of={}", urlencode(a))).unwrap_or_default());
             // The hits and the state heads are two requests that do not depend on each other, and each subject's
             // revisions are one more: run them at once, not one after another. Measured 25 Oct 2026 (tools/use-bench):
             // each request is ~1 s from a seat's machine through the edge, so five in a row made recall 7-9 s and
@@ -4799,7 +5056,22 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 v["id"].as_str().unwrap_or("?")
             );
         }
-        Cmd::Plan { room, name, write, step, note, next } => {
+        Cmd::Plan { pipeline: true, .. } => {
+            let heads = ox.get("/states")?;
+            let mut subjects: Vec<String> = heads["heads"].as_array().into_iter().flatten()
+                .filter(|h| !matches!(h["state"].as_str(), Some("done" | "noted")))
+                .filter_map(|h| h["subject"].as_str().filter(|s| s.starts_with("plan.") && s.split('.').count() == 3).map(str::to_string)).collect();
+            subjects.sort();
+            subjects.dedup();
+            let mut plans = vec![];
+            for subject in subjects {
+                let v = ox.get(&format!("/search?tag={}&limit=200", urlencode(&format!("subject:{subject}"))))?;
+                if let Some(p) = plan::newest_data(&v) { plans.push((subject, p)); }
+            }
+            print!("{}", plan::pipeline(&plans));
+        }
+        Cmd::Plan { room, name, write, step, rank, after, note, next, .. } => {
+            let (room, name) = (room.unwrap_or_default(), name.unwrap_or_default());
             let subject = plan::subject(&room, &name)?;
             let current = || -> Result<Option<Value>> {
                 let v = ox.get(&format!("/search?tag={}&limit=200", urlencode(&format!("subject:{subject}"))))?;
@@ -4818,6 +5090,21 @@ fn run_cli(mut cli: Cli) -> Result<()> {
                 }
                 (Some(_), Some(_)) => anyhow::bail!("ox plan: --write or --step, not both"),
                 (None, None) => (None, None),
+            };
+            // --rank and --after move one step's place or what it waits on, on the page just written or moved, else the newest.
+            let (page, prev_next) = match (rank.as_deref().map(|m| ("rank", m)).into_iter().chain(after.as_deref().map(|m| ("after", m))).collect::<Vec<_>>(), page) {
+                (moves, page) if moves.is_empty() => (page, prev_next),
+                (moves, page) => {
+                    let (mut v, prev) = match page {
+                        Some(v) => (v, prev_next),
+                        None => {
+                            let Some(cur) = current()? else { anyhow::bail!("{subject}: no plan on record yet; write one with --write page.json") };
+                            (cur["data"].clone(), cur["next_touch"].as_str().map(str::to_string))
+                        }
+                    };
+                    for (field, mv) in moves { v = plan::set(&v, field, mv)?; }
+                    (Some(v), prev)
+                }
             };
             match page {
                 Some(v) => {
@@ -4910,6 +5197,309 @@ fn run_cli(mut cli: Cli) -> Result<()> {
 /// 2026-09-28: "the line points at a cache that is always current, instead of at a service that was down
 /// for ten minutes yesterday"). When Oracle cannot be reached the last brief is printed, marked as such,
 /// so a seat still wakes knowing who it is — and knowing the brief is old.
+/// `ox reflect` (docs/REFLECT.md): every seat's new memories in a room (or in every room, `all`) and the reflector's current
+/// observations to /reflect, in batches, oldest first; each observation signed by the reflector in the room it came from.
+fn reflect_cmd(ox: &Ox, room: &str, except: &[String], limit: usize, batches: usize, dry_run: bool) -> Result<()> {
+    let me = ox.get("/whoami")?["handle"].as_str().unwrap_or(&ox.cfg.handle).to_string();
+    let state = ox.home.join("reflect").join(format!("{}.json", capture::safe(room)));
+    let since = std::fs::read_to_string(&state).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["seq"].as_i64()).unwrap_or(0);
+    let mine = |path: &str| -> Result<Vec<Value>> {
+        let v = ox.get(path)?;
+        Ok(v["items"].as_array().cloned().unwrap_or_default().into_iter().filter(|i| i["author"].as_str() == Some(me.as_str())).collect())
+    };
+    let tagged = |i: &Value, t: &str| i["tags"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str() == Some(t)));
+    let all = room == "all";
+    let channel = if all { String::new() } else { format!("&channel={}", urlencode(room)) };
+    // A first run has no place to start from: one room starts at its newest memories, every room at the last day's, so a
+    // whole history is not read in one night.
+    let first_day = (all && since == 0).then(|| now_ms() - 86_400_000);
+    let cap = limit * batches;
+    let keep = |i: &Value| {
+        i["seq"].as_i64().unwrap_or(0) > since
+            && !tagged(i, "reflection")
+            && !except.iter().any(|e| i["author"].as_str() == Some(e.as_str()))
+            && first_day.is_none_or(|d| i["created_ms"].as_i64().unwrap_or(0) >= d)
+    };
+    // A memory is a record tagged memory:<kind> (ox remember, ox capture); kind=memory also holds marks, replies and State
+    // heads. Each kind newest first from the server, paged back to the last one read, then read oldest first.
+    let mut fresh: Vec<Value> = Vec::new();
+    for kind in ["decision", "lesson", "preference", "commitment"] {
+        let mut got = 0;
+        let mut before: Option<i64> = None;
+        for _ in 0..20 {
+            let page = ox.get(&format!("/search?tag=memory:{kind}&limit=200{channel}{}", before.map(|b| format!("&before={b}")).unwrap_or_default()))?;
+            let items = page["items"].as_array().cloned().unwrap_or_default();
+            let oldest = items.iter().filter_map(|i| i["seq"].as_i64()).min();
+            let oldest_ms = items.iter().filter_map(|i| i["created_ms"].as_i64()).min().unwrap_or(0);
+            let kept: Vec<Value> = items.into_iter().filter(|i| keep(i)).collect();
+            got += kept.len();
+            fresh.extend(kept);
+            let more = match first_day {
+                Some(d) => oldest_ms >= d,
+                None => since > 0 || got < cap,
+            };
+            match oldest {
+                Some(o) if o > since && more => before = Some(o),
+                _ => break,
+            }
+        }
+    }
+    fresh.sort_by_key(|i| i["seq"].as_i64().unwrap_or(0));
+    fresh.dedup_by(|a, b| a["id"] == b["id"]);
+    // Each room on its own, so an observation stays in the room its memories came from.
+    let mut rooms: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
+    for m in fresh {
+        let ch = if all { m["channel"].as_str().unwrap_or("").to_string() } else { room.to_string() };
+        rooms.entry(ch).or_default().push(m);
+    }
+    if rooms.is_empty() {
+        println!("nothing to reflect on in {}: no new memories since the last reflection", if all { "any room".to_string() } else { format!("#{room}") });
+        return Ok(());
+    }
+    let mut read_to = since;
+    for (ch, mut list) in rooms {
+        if since == 0 {
+            list = list.split_off(list.len().saturating_sub(cap));
+        } else {
+            list.truncate(cap);
+        }
+        read_to = read_to.max(list.iter().filter_map(|m| m["seq"].as_i64()).max().unwrap_or(since));
+        if list.len() < 2 {
+            println!("#{ch}: {} new memory, two are needed", list.len());
+            continue;
+        }
+        for batch in list.chunks(limit) {
+            if batch.len() < 2 {
+                break; // a lone memory left over in a room is not reflected on alone
+            }
+            reflect_batch(ox, &ch, &me, batch, dry_run, &mine)?;
+            if !dry_run && !all {
+                let top = batch.iter().filter_map(|m| m["seq"].as_i64()).max().unwrap_or(since);
+                std::fs::create_dir_all(state.parent().unwrap())?;
+                std::fs::write(&state, json!({"seq": top, "at": now_ms()}).to_string())?;
+            }
+        }
+    }
+    // Every room in one pass keeps one place: the newest memory it read, saved once every room is done.
+    if !dry_run && all {
+        std::fs::create_dir_all(state.parent().unwrap())?;
+        std::fs::write(&state, json!({"seq": read_to, "at": now_ms()}).to_string())?;
+    }
+    Ok(())
+}
+
+/// One call to /reflect: these memories and the reflector's current observations in the room; each observation signed.
+fn reflect_batch(ox: &Ox, room: &str, me: &str, fresh: &[Value], dry_run: bool, mine: &dyn Fn(&str) -> Result<Vec<Value>>) -> Result<()> {
+    // The current observations: every reflection of mine that no later reflection of mine supersedes.
+    let reflections = mine(&format!("/search?channel={}&tag=reflection&limit=200", urlencode(room)))?;
+    let replaced: std::collections::HashSet<String> = reflections.iter()
+        .flat_map(|r| r["tags"].as_array().cloned().unwrap_or_default())
+        .filter_map(|t| t.as_str().and_then(|t| t.strip_prefix("supersedes:")).map(str::to_string))
+        .collect();
+    let previous: Vec<Value> = reflections.iter()
+        .filter(|r| !replaced.contains(r["id"].as_str().unwrap_or("")))
+        .map(|r| {
+            let about = r["tags"].as_array().and_then(|a| a.iter().find_map(|t| t.as_str()?.strip_prefix("observation:").map(str::to_string)));
+            json!({"id": r["id"], "about": about, "text": r["content"]})
+        })
+        .collect();
+    let memories: Vec<Value> = fresh.iter().map(|m| json!({"id": m["id"], "author": m["author"], "text": m["content"]})).collect();
+    let http = ureq::AgentBuilder::new().resolver(ipv4_first).timeout_connect(Duration::from_secs(5)).timeout(Duration::from_secs(630)).build();
+    let v = match Ox::call_with(&http, &ox.cfg.token, ox.json, ox.base(), "POST", "/reflect", Some(&json!({"memories": memories, "previous": previous}))) {
+        Sent::Ok(v) => v,
+        Sent::Refused(c, d) => bail!("/reflect refused ({c}): {d}"),
+        Sent::Unreachable(e) => bail!("Oracle unreachable ({e})"),
+    };
+    let observations = v["observations"].as_array().cloned().unwrap_or_default();
+    for o in &observations {
+        let (Some(about), Some(text)) = (o["about"].as_str(), o["text"].as_str()) else { continue };
+        // A subject that is only the room's name says nothing the room does not.
+        if about == room || about.strip_prefix("room-") == Some(room) {
+            continue;
+        }
+        let refines = o["refines"].as_str();
+        if dry_run {
+            println!("{about}{}: {text}", refines.map(|r| format!(" (refines {r})")).unwrap_or_default());
+            continue;
+        }
+        let cites: Vec<String> = o["cites"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c.as_str().map(str::to_string)).collect();
+        let mut tags = vec!["reflection".to_string(), format!("observation:{about}")];
+        tags.extend(cites.iter().take(12).map(|c| format!("ref:{c}")));
+        // One current observation a subject: it supersedes the one it refines and any other current one on its subject.
+        let mut replaces: Vec<String> = refines.map(str::to_string).into_iter().collect();
+        replaces.extend(previous.iter().filter(|p| p["about"].as_str() == Some(about)).filter_map(|p| p["id"].as_str().map(str::to_string)));
+        replaces.sort();
+        replaces.dedup();
+        tags.extend(replaces.iter().map(|r| format!("supersedes:{r}")));
+        let cargo = json!({"schema": "reflect/1", "about": about, "cites": cites, "refines": refines, "model": v["model"]}).to_string();
+        let w = ox.write(Kind::Memory, room, text, Some(cargo), tags)?;
+        if !ox.json {
+            println!("reflected ({about}{})  {}", if refines.is_some() { ", refined" } else { "" }, w["id"].as_str().unwrap_or("?"));
+        }
+    }
+    if observations.is_empty() {
+        println!("#{room}: {} memories read; no subject had two of them or a change ({me})", memories.len());
+    }
+    Ok(())
+}
+
+/// `ox capture` (capture.rs, docs/CAPTURE.md): the hook's spool, the drain, or one transcript by hand.
+fn capture_cmd(ox: &Ox, hook: Option<String>, drain: bool, file: Option<PathBuf>, agent: &str, room: &str, dry_run: bool) -> Result<()> {
+    if let Some(agent) = hook {
+        // A hook never fails its agent: whatever goes wrong is logged, and the agent goes on.
+        if let Err(e) = capture_spool(ox, &agent) {
+            capture_log(&ox.home, &format!("hook {agent}: {e:#}"));
+        }
+        return Ok(());
+    }
+    if drain {
+        return capture_drain(ox, room);
+    }
+    let file = file.context("ox capture needs --hook <agent>, --drain, or --file <transcript>")?;
+    anyhow::ensure!(capture::AGENTS.contains(&agent), "--agent is one of {}", capture::AGENTS.join(", "));
+    let raw = std::fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
+    let (text, _) = capture::new_text(&raw, 0);
+    let session = format!("file:{}", file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    let kept = capture_one(ox, agent, &session, &text, room, dry_run)?;
+    if !ox.json {
+        println!("{kept} memor{} {}", if kept == 1 { "y" } else { "ies" }, if dry_run { "would be kept (--dry-run: nothing written)" } else { "kept" });
+    }
+    Ok(())
+}
+
+/// The hook side: the session into the spool, a detached drain started, back to the agent at once.
+fn capture_spool(ox: &Ox, agent: &str) -> Result<()> {
+    use std::io::Read;
+    let mut stdin = String::new();
+    std::io::stdin().take(1 << 20).read_to_string(&mut stdin)?;
+    let s = capture::from_hook(agent, &stdin)?;
+    capture::spool(&ox.home, &s, now_ms())?;
+    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    cmd.arg("--home").arg(&ox.home).args(["capture", "--drain"])
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().context("could not start the drain")?;
+    Ok(())
+}
+
+/// Every spooled capture, one drain at a time. A capture that fails is logged and dropped from the spool; the session's next
+/// capture reads from the same line, so nothing it said is skipped.
+fn capture_drain(ox: &Ox, room: &str) -> Result<()> {
+    let dir = ox.home.join("capture");
+    std::fs::create_dir_all(dir.join("queue"))?;
+    let lock = dir.join("drain.lock");
+    // A lock older than twenty minutes was left by a drain that died.
+    if std::fs::metadata(&lock).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(1200)) {
+        let _ = std::fs::remove_file(&lock);
+    }
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+        return Ok(()); // another drain is at work, and it reads the spool again before it stops
+    }
+    let mut out = Ok(());
+    loop {
+        let mut queued: Vec<PathBuf> = std::fs::read_dir(dir.join("queue"))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        if queued.is_empty() {
+            break;
+        }
+        queued.sort();
+        for f in queued {
+            if let Err(e) = capture_spooled(ox, &f, room) {
+                capture_log(&ox.home, &format!("{}: {e:#}", f.display()));
+                out = Err(e);
+            }
+            let _ = std::fs::remove_file(&f);
+        }
+    }
+    let _ = std::fs::remove_file(&lock);
+    out
+}
+
+fn capture_spooled(ox: &Ox, f: &Path, room: &str) -> Result<()> {
+    let s = capture::unspool(&serde_json::from_str(&std::fs::read_to_string(f)?)?).context("a spool entry that names no session")?;
+    let done = capture::done_lines(&ox.home, &s.session);
+    let (text, total) = match &s.transcript {
+        Some(p) => {
+            let raw = std::fs::read_to_string(p).with_context(|| format!("cannot read the transcript {}", p.display()))?;
+            // A transcript shorter than what was read is a new one under the same name: read it from the start.
+            let from = if raw.lines().count() < done { 0 } else { done };
+            capture::new_text(&raw, from)
+        }
+        None => (s.last_message.clone().map(|m| format!("agent: {m}")).unwrap_or_default(), done),
+    };
+    if text.chars().count() >= capture::MIN_NEW {
+        let kept = capture_one(ox, &s.agent, &s.session, &text, room, false)?;
+        capture_log(&ox.home, &format!("{} {} {}: {kept} kept", s.agent, s.event, s.session));
+    }
+    capture::set_done_lines(&ox.home, &s.session, total, now_ms())
+}
+
+/// Ask the Oracle's /extract about `text` and sign each memory it finds as this seat's; how many were kept.
+fn capture_one(ox: &Ox, agent: &str, session: &str, text: &str, room: &str, dry_run: bool) -> Result<usize> {
+    // A local model on a CPU takes about two minutes a piece; /extract allows ten.
+    let http = ureq::AgentBuilder::new().resolver(ipv4_first).timeout_connect(Duration::from_secs(5)).timeout(Duration::from_secs(630)).build();
+    let (pieces, left) = capture::pieces(text);
+    if left > 0 {
+        capture_log(&ox.home, &format!("{agent} {session}: {left} older piece(s) of new text not read; the newest {} were", pieces.len()));
+    }
+    let mut found: Vec<(Value, Value)> = Vec::new();
+    for piece in &pieces {
+        let v = match Ox::call_with(&http, &ox.cfg.token, ox.json, ox.base(), "POST", "/extract", Some(&json!({"text": piece, "agent": agent}))) {
+            Sent::Ok(v) => v,
+            Sent::Refused(c, d) => bail!("/extract refused ({c}): {d}"),
+            Sent::Unreachable(e) => bail!("Oracle unreachable ({e})"),
+        };
+        found.extend(v["memories"].as_array().cloned().unwrap_or_default().into_iter().map(|m| (m, v["model"].clone())));
+    }
+    let mut kept = 0;
+    for (m, model) in found {
+        let (Some(kind), Some(body)) = (m["kind"].as_str(), m["text"].as_str()) else { continue };
+        if capture_known(ox, room, body)? {
+            continue;
+        }
+        kept += 1;
+        if dry_run {
+            println!("{kind}: {body}");
+            continue;
+        }
+        let cargo = json!({"schema": "capture/1", "agent": agent, "session": session, "model": model, "why": m["why"]}).to_string();
+        let tags = vec![format!("memory:{kind}"), "extracted:session".to_string(), format!("capture:{agent}")];
+        let w = ox.write(Kind::Memory, room, body, Some(cargo), tags)?;
+        if !ox.json {
+            println!("captured ({kind})  {}", w["id"].as_str().unwrap_or("?"));
+        }
+    }
+    Ok(kept)
+}
+
+/// Whether the room already holds this memory word for word (spacing and case aside).
+fn capture_known(ox: &Ox, room: &str, text: &str) -> Result<bool> {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let words = text.split_whitespace().take(10).collect::<Vec<_>>().join(" ");
+    let v = ox.get(&format!("/search?q={}&channel={}&limit=5&match=any", urlencode(&words), urlencode(room)))?;
+    let hits = v["hits"].as_array().or(v["items"].as_array()).cloned().unwrap_or_default();
+    Ok(hits.iter().any(|h| h["content"].as_str().is_some_and(|c| norm(c) == norm(text))))
+}
+
+/// One line in `<home>/capture/log`; the log is started again past a megabyte.
+fn capture_log(home: &Path, line: &str) {
+    use std::io::Write;
+    let file = home.join("capture").join("log");
+    let _ = std::fs::create_dir_all(home.join("capture"));
+    if std::fs::metadata(&file).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::remove_file(&file);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        let _ = writeln!(f, "{} {line}", oracle_proto::iso_ms(now_ms()));
+    }
+}
+
 fn brief(ox: &Ox, full: bool) -> Result<()> {
     if !ox.json { eprintln!("Offline agent guide: ox manual workflow (reference: ox manual)"); }
     let cache = ox.home.join("brief.cache");
@@ -6674,7 +7264,7 @@ mod paging_tests {
         // the hidden names are not in the help
         let visible: Vec<String> = <Cli as clap::CommandFactory>::command().get_subcommands().filter(|c| !c.is_hide_set()).map(|c| c.get_name().to_string()).collect();
         assert!(!visible.iter().any(|v| old_name_of(v).is_some()), "{visible:?}");
-        assert_eq!(visible.len(), 50, "{visible:?}"); // + types, retype (31 Oct 2026, T7); + delta (1 Nov 2026, the waking read)
+        assert_eq!(visible.len(), 54, "{visible:?}"); // + types, retype (31 Oct 2026, T7); + delta (1 Nov 2026, the waking read); + edit (3 Nov 2026, docs/EDIT.md); + capture, reflect (4 Nov 2026, docs/CAPTURE.md, docs/REFLECT.md); + verify (4 Nov 2026, docs/VERIFY.md)
     }
 }
 

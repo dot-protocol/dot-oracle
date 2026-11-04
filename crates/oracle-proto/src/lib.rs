@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 pub mod keyfile;
 pub mod microdot;
+pub mod offline;
 
 /// Accepted clock skew between a client and the server, and the replay window for nonces.
 pub const MAX_SKEW_MS: i64 = 5 * 60 * 1000;
@@ -459,6 +460,16 @@ pub fn generate_key() -> SigningKey {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_moment_is_milliseconds_seconds_a_date_through_its_end_or_a_date_and_time() {
+        assert_eq!(super::parse_when("1793664000000"), Some(1_793_664_000_000));
+        assert_eq!(super::parse_when("1793664000"), Some(1_793_664_000_000), "seconds read as seconds");
+        assert_eq!(super::parse_when("2026-11-03"), Some(super::parse_when("2026-11-04T00:00").unwrap() - 1), "a date is through its last millisecond");
+        assert_eq!(super::iso_ms(super::parse_when("2026-11-03T15:30Z").unwrap()), "2026-11-03T15:30:00.000Z");
+        assert_eq!(super::iso_ms(super::parse_when("2024-02-29T00:00:05").unwrap()), "2024-02-29T00:00:05.000Z", "a leap day");
+        for bad in ["", "soon", "2026-13-01", "2026-11-03T25:00", "2026-11", "-5"] { assert_eq!(super::parse_when(bad), None, "{bad}"); }
+    }
+
     use super::*;
 
     fn key() -> SigningKey {
@@ -764,6 +775,36 @@ pub fn local_clock(ms: i64, setting: Option<&str>) -> Option<String> {
 /// `local_clock` with the server's setting.
 pub fn local_clock_env(ms: i64) -> Option<String> {
     local_clock(ms, std::env::var("ORACLE_LOCAL_OFFSET").ok().as_deref())
+}
+
+/// A moment written by a person or a tag (3 Nov 2026, facts valid in time): unix milliseconds (or seconds, under 10^11), or a
+/// UTC date `2026-10-01`, or a date and time `2026-10-01T15:30[:05][Z]`. A date alone means through the end of that day (its
+/// last millisecond): "valid until 1 Oct" holds on 1 Oct, "as of 1 Oct" sees what was written that day. None when it is
+/// none of these.
+pub fn parse_when(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        let n: i64 = s.parse().ok()?;
+        return Some(if n < 100_000_000_000 { n * 1000 } else { n });
+    }
+    let (date, time) = match s.split_once('T') { Some((d, t)) => (d, Some(t)), None => (s, None) };
+    let d: Vec<i64> = date.split('-').map(|x| x.parse::<i64>().ok()).collect::<Option<Vec<_>>>()?;
+    let [y, mo, da] = d[..] else { return None };
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) || !(1..=9999).contains(&y) { return None; }
+    let (y2, m2) = if mo <= 2 { (y - 1, mo + 9) } else { (y, mo - 3) };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + (153 * m2 + 2) / 5 + da - 1;
+    let day = (era * 146_097 + doe - 719_468) * 86_400_000;
+    match time {
+        None => Some(day + 86_400_000 - 1),
+        Some(t) => {
+            let t: Vec<i64> = t.trim_end_matches('Z').split(':').map(|x| x.parse::<i64>().ok()).collect::<Option<Vec<_>>>()?;
+            let (h, mi, se) = match t[..] { [h, mi] => (h, mi, 0), [h, mi, se] => (h, mi, se), _ => return None };
+            if !(0..24).contains(&h) || !(0..60).contains(&mi) || !(0..60).contains(&se) { return None; }
+            Some(day + h * 3_600_000 + mi * 60_000 + se * 1000)
+        }
+    }
 }
 
 /// Milliseconds since the epoch as ISO-8601 UTC with millisecond precision: `2026-09-20T18:21:07.412Z`.

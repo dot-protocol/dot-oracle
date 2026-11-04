@@ -77,6 +77,11 @@ fn seeded() -> (Seed, Vec<String>) {
         let rev = oracle_mcp::state_revision(who, &[], &json!({}), &[format!("current={current}"), "purpose=a seat".into()]).unwrap();
         ids.push(f.put(who, n, who, Kind::Say, "State updated", Some(rev), &["room-context:v1", "intent:status"]));
     }
+    // EVERY MIND'S NOW: rocky's older NOW is replaced by its newer one; emmy has one; noor none; one in the private room.
+    for (who, n, task) in [("rocky", 3, "An old task."), ("rocky", 3, "Wiring the one door. Then the Map."), ("emmy", 6, "Verifying Dot's runtime")] {
+        f.put(who, n, who, Kind::Say, "NOW", Some(json!({"schema": "now/1", "task": task, "next": "the next thing"})), &["now"]);
+    }
+    f.put("blaze", 1, "secret", Kind::Say, "NOW", Some(json!({"schema": "now/1", "task": "secret work"})), &["now"]);
     // OPEN QUESTIONS: three decide asks to blaze, one answered.
     let mut asks = vec![];
     for i in 0..3 {
@@ -148,6 +153,12 @@ fn the_world_page_composes_six_bounded_sections_from_signed_heads() {
     // ACTIVE SEATS: the two with a State, newest written first.
     let seats: Vec<(&str, &str)> = w["seats"]["items"].as_array().unwrap().iter().map(|s| (s["seat"].as_str().unwrap(), s["current"].as_str().unwrap())).collect();
     assert_eq!(seats, [("emmy", "Reviewing the budgets"), ("rocky", "Building the world page.")]);
+    // THE ONE DOOR: every room with a signed State (here the two seat rooms), and every mind's newest NOW.
+    let rooms: Vec<(&str, &str)> = w["rooms"]["items"].as_array().unwrap().iter().map(|r| (r["room"].as_str().unwrap(), r["current"].as_str().unwrap())).collect();
+    assert!(rooms.contains(&("rocky", "Building the world page.")) && rooms.contains(&("emmy", "Reviewing the budgets")), "{rooms:?}");
+    assert!(rooms.iter().all(|(r, _)| *r != "secret"));
+    let minds: Vec<(&str, &str)> = w["minds"]["items"].as_array().unwrap().iter().map(|m| (m["seat"].as_str().unwrap(), m["task"].as_str().unwrap())).collect();
+    assert_eq!(minds, [("emmy", "Verifying Dot's runtime"), ("rocky", "Wiring the one door.")], "each mind's newest NOW, newest first, nothing private");
     // OPEN QUESTIONS: the two unanswered decides, oldest first.
     let q: Vec<&str> = w["questions"]["items"].as_array().unwrap().iter().map(|q| q["id"].as_str().unwrap()).collect();
     let n = ids.len();

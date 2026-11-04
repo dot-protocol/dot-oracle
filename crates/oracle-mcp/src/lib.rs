@@ -272,7 +272,7 @@ pub fn tools(legacy: bool) -> Value {
              json!({"op": {"type": "string", "enum": ["list", "meta", "get"]}, "room": s("with list: room name, without #"), "id": s("with meta or get: the file id, sha256:<hex> or the hex alone"),
                     "max": {"type": "integer", "minimum": 1000, "maximum": 400000, "description": "with get: characters of text to return (default 60000)"}, "limit": lim(200)}), &["op"], true),
         tool("oracle_recall", "Ranked search over everything. Use before answering from memory. Each hit is one short entry (id, room, signer, date, the passage that matched) to choose from; open the one you pick whole with oracle_get. gist: false returns whole texts instead.",
-             json!({"include_archived": {"type": "boolean", "description": "search the archived rooms and expired records too; off, the answer names what it left out"}, "where": {"type": "boolean", "description": "instead of hits: which rooms say the words, how often, first and last date (was oracle_where)"}, "any": {"type": "boolean", "description": "with where: match any of the words instead of all"}, "terms": {"type": "boolean", "description": "instead of hits: the words that matter, ranked, refreshed hourly (was oracle_terms)"}, "query": s("what you need"), "room": s("restrict to one room"), "limit": lim(50),
+             json!({"include_archived": {"type": "boolean", "description": "search the archived rooms and expired records too; off, the answer names what it left out"}, "where": {"type": "boolean", "description": "instead of hits: which rooms say the words, how often, first and last date (was oracle_where)"}, "any": {"type": "boolean", "description": "with where: match any of the words instead of all"}, "terms": {"type": "boolean", "description": "instead of hits: the words that matter, ranked, refreshed hourly (was oracle_terms)"}, "answerable": {"type": "boolean", "description": "instead of hits, a cheap check before recall: can Oracle answer this? yes (every content word on record and an approved reading answers it), partial (some of it, or nothing approved) or no, with the words on record and not, and how much of each concept it names is approved"}, "query": s("what you need"), "room": s("restrict to one room"), "as_of": s("as of a moment (a date through its end, or a date and time): only what was on record then, and what still held then"), "limit": lim(50),
                     "gist": {"type": "boolean", "description": "default true: short entries to choose from (open one with oracle_get); false for whole texts"}}), &["query"], true),
         tool("oracle_say", "Speak in a room, signed as this seat. @handle in the text addresses a seat. When you need something back from the seats you address, say so with `ask`: it puts the message on their waiting list until each of them answers.",
              json!({"expires": s("when this record leaves the view: a span (48h, 7d) or a unix ms; for alerts and feeds (docs/ARCHIVE.md)"), "room": s("room name, without #"), "text": s("the message; multi-line is fine"),
@@ -304,7 +304,7 @@ pub fn tools(legacy: bool) -> Value {
              &["target", "verdict"], false),
         tool("oracle_remember", "Record durable knowledge. Not for status lines or dashboards.",
              json!({"text": s("the knowledge, self-contained"), "kind": {"type": "string", "enum": MEMORY_KINDS},
-                    "room": s("default: memory"), "op_id": s("a write happens once per op_id: you may choose it (8-64 of A-Za-z0-9_-), reuse the same one to retry a write whose outcome was unknown (it is then never applied twice), and an op_id already used for a different write is refused")}), &["text", "kind"], false),
+                    "room": s("default: memory"), "valid_until": s("until when it holds: a date (through its end), a date and time, or unix ms; after it, recall ranks it as a replaced fact"), "op_id": s("a write happens once per op_id: you may choose it (8-64 of A-Za-z0-9_-), reuse the same one to retry a write whose outcome was unknown (it is then never applied twice), and an op_id already used for a different write is refused")}), &["text", "kind"], false),
         tool("oracle_task", "Write a state head for work I own. open and running need next (a date), or the head rots. blocked needs needs, blocks, check and a next within 3 days: a blocker is re-checked, never left to sit.",
              json!({"owner": s("with no subject: whose heads to list, a handle or * (was oracle_tasks)"), "exp": {"type": "boolean", "description": "with no subject: the experiment registry, newest first (was oracle_experiments)"}, "track": s("with exp: e.g. qsb, fhe, oracle-memory"), "stage": s("with exp: e.g. proposed, running, measured, killed"), "q": s("with exp: words that must all appear"), "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "with no subject: at most this many heads, newest-touched first (default 50; budget says what was cut); with exp: rows"},
                     "offset": {"type": "integer", "minimum": 0, "description": "with no subject: skip this many heads, the next page (budget.more names it)"}, "subject": s("stable id of the work"), "state": {"type": "string", "enum": ["noted", "open", "running", "blocked", "done"]},
@@ -699,6 +699,45 @@ pub fn heads_path(me: &str, owner: Option<&str>, room: Option<&str>) -> String {
 /// `oracle_where` / `ox where`: one page of matches grouped by room.
 pub fn where_path(query: &str, any: bool) -> String {
     format!("/search?q={}&format=page&limit=1&by_room=true{}", enc(query), if any { "&match=any" } else { "" })
+}
+
+/// `oracle_recall` with `answerable` / `ox recall --answerable`: the pre-flight (`GET /answerable`, schema answerable/1).
+pub fn answerable_path(query: &str, room: Option<&str>) -> String {
+    let room = room.filter(|r| !r.trim().is_empty()).map(|r| format!("&room={}", enc(r.trim_start_matches('#')))).unwrap_or_default();
+    format!("/answerable?q={}{room}", enc(query))
+}
+
+/// The pre-flight as a seat reads it: the verdict and why, each word with its count, what is missing, what is approved, the
+/// concepts named with how much of each is approved, and what to do next.
+pub fn answerable_text(v: &Value) -> String {
+    let st = |x: &Value| x.as_str().unwrap_or("").to_owned();
+    let mut out = vec![format!("ANSWERABLE  {}  {}", st(&v["verdict"]).to_uppercase(), st(&v["says"]))];
+    let words: Vec<String> = v["words"].as_array().into_iter().flatten().map(|w| {
+        let (n, a) = (w["records"].as_i64().unwrap_or(0), w["approved"].as_i64().unwrap_or(0));
+        let n = if n >= 1000 { "1000+".to_owned() } else { n.to_string() };
+        if a > 0 { format!("{} {n} ({a} approved)", st(&w["word"])) } else { format!("{} {n}", st(&w["word"])) }
+    }).collect();
+    if !words.is_empty() {
+        out.push(format!("  words     {}", words.join(" · ")));
+    }
+    let ids = |x: &Value| x.as_array().into_iter().flatten().filter_map(|i| i.as_str()).collect::<Vec<_>>().join(" ");
+    for (label, list) in [("approved", &v["all_words"]["approved"]), ("others", &v["all_words"]["others"]), ("graph", &v["graph"]["records"])] {
+        let l = ids(list);
+        if !l.is_empty() {
+            out.push(format!("  {label:<9} {l}"));
+        }
+    }
+    let nodes: Vec<String> = v["graph"]["nodes"].as_array().into_iter().flatten().map(|n| match n["certification"].as_str() {
+        Some(c) => format!("{} ({c} {}/{})", st(&n["title"]), n["approved"].as_u64().unwrap_or(0), n["readings"].as_u64().unwrap_or(0)),
+        None => st(&n["title"]),
+    }).collect();
+    if !nodes.is_empty() {
+        out.push(format!("  names     {}", nodes.join(" · ")));
+    }
+    if let Some(n) = v["next"].as_str() {
+        out.push(format!("  next      {n}"));
+    }
+    out.join("\n")
 }
 
 /// `oracle_experiments` / `ox experiments`: `limit` (1-200, default 60) and the optional `track`, `stage`, `q`.
@@ -1595,6 +1634,15 @@ pub fn my_asks_count_nudge(c: &Value) -> Option<Option<String>> {
     Some((total > 0).then(|| format!("· mine: {open} open, {answered} answered, close them: ox asks --mine")))
 }
 
+/// How to tell the owner, printed under NOW on every wake (Blaze, 3 Nov 2026: "why do you have to look up the card
+/// format every time ... that should be part of your core brief"). The same flags `tell_problems` checks; a decide is
+/// the only ask the Bridge turns into a card today (dotd reads waiting_on_me), so the check is that its card landed.
+const TELL_BLOCK: &str = "TELL       the owner reads the Bridge, never this terminal; a decide is the only ask that becomes a card\n  \
+decide   ox tell \"<head, at most 40 words>\" --ask decide --option \"<what happens>\" --option \"<what happens>\" --recommend <n> --why \"<one sentence>\" --by <date> --affects \"<who>: <how>\" --absent \"<who>: <why>\" --owed \"<what it owes>\" --room <room>\n  \
+rules    2 to 6 options of at most 80 characters each, in the owner's words; --why at most 240; one question a message\n  \
+answer   the same, plus --reply <their OBS id> in its room; a new topic is top level in your own room\n  \
+check    signed:ok <id>, then the card <id>#ask is in the Bridge store (bridge/events.sqlite, event_id) within a minute\n";
+
 /// The brief a session starts with: who I am, my last RESUME note, what is addressed to me, what is new, and the work I own counted.
 pub fn brief_text(door: &dyn Door) -> Result<String> {
     brief_with(door, false)
@@ -2094,6 +2142,9 @@ pub fn procedure_render(p: &Value, now_ms: i64) -> String {
     out
 }
 
+/// How many LAW lines a brief shows; `--full` shows every one (3 Nov 2026: 292 approved readings are ~11k tokens whole).
+pub const LAW_BRIEF_TOP: usize = 25;
+
 /// The kinds a canon rule can be (docs/CANON.md), in the order `ox canon` prints them.
 pub const CANON_KINDS: [&str; 7] = ["law", "authority", "safety", "bridge", "work", "craft", "domain"];
 /// The kinds the brief prints whole: what a woken seat must never get wrong.
@@ -2358,8 +2409,12 @@ pub fn brief_value(door: &dyn Door, full: bool) -> Result<Value> {
     let fold = door.get("/fold?limit=1").unwrap_or(Value::Null);
     let elsewhere: serde_json::Map<String, Value> = fold["pending"].as_object().cloned().unwrap_or_default();
     let total: i64 = elsewhere.values().filter_map(Value::as_i64).sum();
-    let heads: Vec<Value> = door.get(&format!("/states?owner={}", enc(&handle)))?["heads"].as_array().cloned().unwrap_or_default()
-        .into_iter().filter(|h| h["state"].as_str() != Some("done")).collect();
+    // A seat scoped to its rooms may not read the heads (the seat-scope guard refuses GET /states); its brief is still a
+    // brief: the heads are said to be closed to it, never the whole brief refused (Dot, 4 Nov 2026: `ox brief` was a 403).
+    let (heads, heads_error): (Vec<Value>, Value) = match door.get(&format!("/states?owner={}", enc(&handle))) {
+        Ok(v) => (v["heads"].as_array().cloned().unwrap_or_default().into_iter().filter(|h| h["state"].as_str() != Some("done")).collect(), Value::Null),
+        Err(e) => (vec![], json!(format!("{e:#}"))),
+    };
     let late = heads.iter().filter(|h| overdue(h["next_touch"].as_str().unwrap_or("—"), now).is_some()).count();
     let cards = door.get(&format!("/cards?owner={}&status=open", enc(&handle))).ok().filter(|c| c["cards"].is_array());
     let mut by: Vec<(String, usize)> = vec![];
@@ -2370,6 +2425,9 @@ pub fn brief_value(door: &dyn Door, full: bool) -> Result<Value> {
     by.sort_by_key(|(s, _)| order(s));
     let waiting = door.get(&format!("/cards?waiting_on={}", enc(&handle))).ok().filter(|c| c["cards"].is_array());
     let mut work = json!({"heads": heads.len(), "overdue": late, "cards": by.iter().map(|(s, n)| json!([s, n])).collect::<Vec<_>>()});
+    if !heads_error.is_null() {
+        work["error"] = heads_error;
+    }
     if full {
         work["head_list"] = json!(heads.iter().map(|h| json!({"subject": h["subject"], "state": h["state"], "next": h["next_touch"],
             "overdue": overdue(h["next_touch"].as_str().unwrap_or("—"), now)})).collect::<Vec<_>>());
@@ -2386,6 +2444,18 @@ pub fn brief_value(door: &dyn Door, full: bool) -> Result<Value> {
         }
     } else {
         json!({"unavailable": "this Oracle does not count its cortex yet (GET /cortex?count=1, 1 Nov 2026)"})
+    };
+    // The law every seat wakes with (Noor, 3 Nov 2026): what Blaze approved as Rule, Profile or
+    // Preference, one line each, most linked first; the brief shows LAW_BRIEF_TOP, --full every line. Asked only of a server that
+    // serves it (whoami features); an unreadable list is said, never none.
+    let law = if who["features"].as_array().is_some_and(|f| f.iter().any(|x| x == "cortex_law")) {
+        match door.get(&format!("/cortex/law?top={}", if full { 10_000 } else { LAW_BRIEF_TOP })) {
+            Ok(l) if l["schema"] == "cortex-law/1" => l,
+            Ok(_) => json!({"error": "the server's answer was not cortex-law/1"}),
+            Err(e) => json!({"error": format!("{e:#}")}),
+        }
+    } else {
+        Value::Null
     };
     Ok(json!({
         "now": oracle_proto::iso_ms(now), "now_ms": now, "local": local_of(&who, now),
@@ -2405,6 +2475,7 @@ pub fn brief_value(door: &dyn Door, full: bool) -> Result<Value> {
         "work": work,
         "waiting_on_you": waiting.unwrap_or(Value::Null),
         "cortex": cortex,
+        "law": law,
         "outbox": door.queued(),
     }))
 }
@@ -2482,6 +2553,7 @@ pub fn brief_render(b: &Value, full: bool) -> String {
     out += &format!("IDENTITY   {handle} · {}\n", b["identity"].as_str().unwrap_or(""));
     // What I am doing this minute comes before everything else (docs/NOW.md).
     out += &now_render(&b["now_head"], now, handle);
+    out += TELL_BLOCK;
     // Who I am, whole, right after what I am doing (docs/IDENTITY.md); then the State without its one-line persona.
     let has_identity = b["identity_head"]["head"].is_object();
     if !b["identity_head"].is_null() {
@@ -2576,6 +2648,8 @@ pub fn brief_render(b: &Value, full: bool) -> String {
             out += &format!("YOUR CARDS ({card_total})\n");
             out += &cards_text(&w["card_list"], false);
         }
+    } else if let Some(e) = w["error"].as_str() {
+        out += &format!("WORK       heads not readable here ({e}) · {card_total} cards ({})\n", cards.join(" · "));
     } else {
         out += &format!("WORK       {} open heads ({} overdue) · {card_total} cards ({}) — ox brief --full lists them\n",
             w["heads"], w["overdue"], cards.join(" · "));
@@ -2585,6 +2659,18 @@ pub fn brief_render(b: &Value, full: bool) -> String {
         out += &format!("CORTEX     {} approved nodes · {} marks waiting on Blaze's verdict — oracle_cortex op=nodes top=10\n", c["approved_nodes"], c["pending_marks"]);
     } else if let Some(e) = c["error"].as_str() {
         out += &format!("CORTEX     could not be counted: {e}\n");
+    }
+    let law = &b["law"];
+    if let Some(lines) = law["lines"].as_array() {
+        let (total, shown) = (law["total"].as_u64().unwrap_or(0), lines.len() as u64);
+        out += &format!("LAW        {total} readings Blaze approved as Rule, Profile or Preference{}\n",
+            if shown < total { format!(" · the {shown} most linked here; every one: ox brief --full") } else { String::new() });
+        for l in lines {
+            let code = l["code"].as_str().unwrap_or("?");
+            out += &format!("  - {} ({})\n", l["line"].as_str().unwrap_or(""), &code[code.len().saturating_sub(12)..]);
+        }
+    } else if let Some(e) = law["error"].as_str() {
+        out += &format!("LAW        could not be read: {e}\n");
     }
     if b["waiting_on_you"]["cards"].is_array() {
         let n = b["waiting_on_you"]["cards"].as_array().map_or(0, |a| a.len());
@@ -2630,7 +2716,8 @@ pub fn inbox_value(door: &dyn Door, limit: i64, ack: Ack, older: bool) -> Result
     };
     let (ask_rows, ask_cut) = if asks["error"].is_null() { asks_keep(&mut asks, rows_max) } else { (0, 0) };
     let older_unlisted = if older { 0 } else { asks["older_count"].as_u64().unwrap_or(0) as usize };
-    let v = door.get(&format!("/fold?limit={limit}"))?;
+    let v = fold_or_rooms(door, limit, &who)?;
+    let scoped = v["scoped"] == true;
     let items = v["items"].as_array().cloned().unwrap_or_default();
     let (page_mine, rest): (Vec<Value>, Vec<Value>) = items.into_iter().partition(|i| i["for_me"] == true);
     // What is addressed to me comes first and newest first, whether or not this page reached it (Jobs' audit,
@@ -2701,6 +2788,8 @@ pub fn inbox_value(door: &dyn Door, limit: i64, ack: Ack, older: bool) -> Result
         more.push(format!("limit: {mine_total} lists every message addressed to you here ({} not listed; ack marks read only up to the first of them)", mine_cut.len()));
     }
     let acked = match &ack {
+        // A scoped seat has no read marks to move (GET and POST /fold are not open to it): nothing is marked read.
+        _ if scoped => false,
         Ack::No => false,
         Ack::Page => {
             door.post("/fold", &json!({"marks": marks}))?;
@@ -2719,8 +2808,65 @@ pub fn inbox_value(door: &dyn Door, limit: i64, ack: Ack, older: bool) -> Result
         "for_me": whole,
         "rooms": rooms.into_iter().map(|(_, e)| e).collect::<Vec<_>>(),
         "marks": marks, "acked": acked,
+        // What a scoped page is, said plainly (Emmy's review of e76f1aa): recent history of the seat's own rooms, bounded per
+        // room; a reply or annotation takes a task off it but does not complete the task. Not a complete ledger of pending work.
+        "scoped": if scoped { json!(format!("history of your rooms, the last {} records of each: a task you replied to leaves this page but is not thereby done; this is not a complete list of pending work", limit.clamp(1, 200))) } else { Value::Null },
         "budget": budget(ask_rows + whole.len(), ask_cut + older_unlisted + mine_cut.len(), (!more.is_empty()).then(|| more.join("; "))),
     }))
+}
+
+/// The fold page, or for a seat scoped to its rooms (the seat-scope guard refuses `/fold`; Dot, 4 Nov 2026) the same shape
+/// built only from what it may read: its rooms (`/rooms/mine`) and their records (`/search?channel=`). A record names it
+/// (`to:` or `mention:`) and it has not spoken in that room since: it is for it. Nothing is opened on the server; there are
+/// no marks, so `scoped` says so and the caller never acks.
+fn fold_or_rooms(door: &dyn Door, limit: i64, who: &Value) -> Result<Value> {
+    match door.get(&format!("/fold?limit={limit}")) {
+        Ok(v) => Ok(v),
+        Err(e) if format!("{e:#}").contains("is scoped to its rooms") => {
+            let me = who["handle"].as_str().unwrap_or("").to_string();
+            let rooms = door.get("/rooms/mine")?;
+            let mut items: Vec<Value> = vec![];
+            let mut more_rows = false;
+            for r in rooms["rooms"].as_array().into_iter().flatten().filter_map(|r| r["room"].as_str()) {
+                let page = door.get(&format!("/search?channel={}&limit={}", enc(r), limit.clamp(1, 200)))?;
+                more_rows |= !page["next_before"].is_null();
+                let mut got: Vec<Value> = page["items"].as_array().cloned().unwrap_or_default();
+                got.sort_by_key(|i| i["created_ms"].as_i64().unwrap_or(0));
+                // What I have answered: a record of mine that replies to it. Any other word of mine (a progress line, a diary) is
+                // not an answer and leaves an addressed task listed (Emmy's review of b46d543). An annotation is not on a room page
+                // (the search page lists no annotate records; Dot's review), so it cannot take a task off; a tag may carry an @.
+                let tags_of = |i: &Value| i["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<String>>();
+                let answered: std::collections::BTreeSet<String> = got.iter().filter(|i| i["author"].as_str() == Some(me.as_str()))
+                    .flat_map(|i| tags_of(i).into_iter().filter_map(|t| ["reply:", "re:", "annotates:"].iter().find_map(|p| t.strip_prefix(p).map(str::to_owned))))
+                    .collect();
+                let last_mine = got.iter().filter(|i| i["author"].as_str() == Some(me.as_str())).filter_map(|i| i["created_ms"].as_i64()).max().unwrap_or(0);
+                for mut i in got {
+                    let named = tags_of(&i).iter().any(|t| ["to:", "mention:"].iter().any(|p| t.strip_prefix(p).is_some_and(|v| v.trim_start_matches('@') == me)));
+                    let id = i["id"].as_str().unwrap_or("").to_string();
+                    let after = i["created_ms"].as_i64().unwrap_or(0) > last_mine;
+                    // Mine is never listed; addressed to me, listed until I answer it; the rest only since my last word.
+                    if i["author"].as_str() == Some(me.as_str()) || (named && answered.contains(&id)) || (!named && !after) {
+                        continue;
+                    }
+                    if i["channel"].is_null() {
+                        i["channel"] = json!(r);
+                    }
+                    i["for_me"] = json!(named);
+                    items.push(i);
+                }
+            }
+            // NEW counts what this page lists per room (there are no read marks to count from; Dot's check, 4 Nov 2026: "0 new"
+            // beside 13 listed records said nothing).
+            let mut pending = serde_json::Map::new();
+            for i in &items {
+                let r = i["channel"].as_str().unwrap_or("?").to_string();
+                let n = pending.get(&r).and_then(Value::as_i64).unwrap_or(0) + 1;
+                pending.insert(r, json!(n));
+            }
+            Ok(json!({"items": items, "unread_for_me": [], "pending": pending, "next_marks": {}, "has_more": more_rows, "scoped": true}))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// How many inbox rows an MCP call answers when it names no limit (Rocky's live pass, 1 Nov 2026 07:15Z: `oracle_inbox
@@ -2981,6 +3127,9 @@ pub fn inbox_render(b: &Value) -> String {
     let mut out = format!("inbox · now {} (Oracle clock, UTC){}\n", b["now"].as_str().unwrap_or("?"), local_suffix(&b["local"], b["now_ms"].as_i64().unwrap_or_else(now_ms)));
     out += &asks_render(&b["asks"], b["now_ms"].as_i64().unwrap_or_else(now_ms));
     out += &format!("NEW · {} new, {} on this page{}\n", b["new"], b["page"], if b["has_more"] == true { ", more after it" } else { "" });
+    if let Some(note) = b["scoped"].as_str() {
+        out += &format!("SCOPED · {note}\n");
+    }
     let mine = b["for_me"].as_array().cloned().unwrap_or_default();
     if !mine.is_empty() {
         out += &format!("FOR YOU ({}), newest first, whole or by header\n", mine.len());
@@ -3471,7 +3620,7 @@ pub fn gist_render(n: usize, g: &Value) -> String {
 // ── the tools ────────────────────────────────────────────────────────────────────────────────
 
 fn recall(door: &dyn Door, query: &str, room: Option<&str>, limit: i64) -> Result<String> {
-    recall_in(door, query, room, limit, false)
+    recall_in(door, query, room, limit, false, None)
 }
 
 /// `expires:` from a span (`48h`, `7d`, `90m`) or a unix ms, as a unix ms (docs/ARCHIVE.md).
@@ -3493,12 +3642,13 @@ pub fn expires_ms(spec: &str, now_ms: i64) -> Result<i64> {
     Ok(now_ms + ms)
 }
 
-fn recall_in(door: &dyn Door, query: &str, room: Option<&str>, limit: i64, include_archived: bool) -> Result<String> {
+fn recall_in(door: &dyn Door, query: &str, room: Option<&str>, limit: i64, include_archived: bool, as_of: Option<&str>) -> Result<String> {
     let v = door.get(&format!(
-        "/search?q={}&limit={limit}{}{}",
+        "/search?q={}&limit={limit}{}{}{}",
         enc(query),
         room.map(|r| format!("&channel={}", enc(r))).unwrap_or_default(),
-        if include_archived { "&include_archived=true" } else { "" }
+        if include_archived { "&include_archived=true" } else { "" },
+        as_of.filter(|a| !a.trim().is_empty()).map(|a| format!("&as_of={}", enc(a))).unwrap_or_default()
     ))?;
     let hits = v["hits"].as_array().cloned().unwrap_or_default();
     if hits.is_empty() {
@@ -4110,6 +4260,10 @@ pub fn call(door: &dyn Door, name: &str, a: &Value) -> Result<String> {
         // The modes of the fold (docs/mcp.md): a flag picks what was its own tool; they come first so the guard wins.
         "oracle_recall" if a["where"].as_bool() == Some(true) => call(door, "oracle_where", a)?,
         "oracle_recall" if a["terms"].as_bool() == Some(true) => call(door, "oracle_terms", a)?,
+        "oracle_recall" if a["answerable"].as_bool() == Some(true) => {
+            let query = text_of(a, "query")?;
+            answerable_text(&door.get(&answerable_path(&query, a["room"].as_str()))?)
+        }
         "oracle_task" if a["exp"].as_bool() == Some(true) => experiments_text(&door.get(&experiments_path(a))?),
         "oracle_task" if a["subject"].as_str().is_none_or(|s| s.trim().is_empty()) => tasks(door, a["owner"].as_str(), a["room"].as_str(), a)?,
         "oracle_react" if a["mark"].as_str() == Some("archive") => call(door, "oracle_archive", a)?,
@@ -4150,7 +4304,7 @@ pub fn call(door: &dyn Door, name: &str, a: &Value) -> Result<String> {
         }
         "oracle_get" => full(&door.get(&format!("/search?id={}", enc(&text_of(a, "id")?)))?),
         "oracle_thread" => thread_text(&door.get(&format!("/threads?id={}", enc(&text_of(a, "id")?)))?),
-        "oracle_recall" => recall_in(door, &text_of(a, "query")?, a["room"].as_str(), a["limit"].as_i64().unwrap_or(10), a["include_archived"].as_bool().unwrap_or(false))?,
+        "oracle_recall" => recall_in(door, &text_of(a, "query")?, a["room"].as_str(), a["limit"].as_i64().unwrap_or(10), a["include_archived"].as_bool().unwrap_or(false), a["as_of"].as_str())?,
         "oracle_query" => recall(door, &text_of(a, "query")?, None, a["limit"].as_i64().unwrap_or(10))?,
         "oracle_about" => recall(door, &text_of(a, "terms")?, Some(&text_of(a, "room")?), a["limit"].as_i64().unwrap_or(15))?,
         "oracle_say" => {
@@ -4259,8 +4413,13 @@ pub fn call(door: &dyn Door, name: &str, a: &Value) -> Result<String> {
                 bail!("kind must be one of {MEMORY_KINDS:?}. Status lines and dashboards are not knowledge.");
             }
             let room = a["room"].as_str().unwrap_or("memory");
+            let mut tags = vec![format!("memory:{kind}")];
+            if let Some(v) = a["valid_until"].as_str().filter(|v| !v.trim().is_empty()) {
+                let ms = oracle_proto::parse_when(v).ok_or_else(|| anyhow::anyhow!("valid_until {v:?}: a date (2026-12-31), a date and time, or unix ms"))?;
+                tags.push(format!("valid-until:{ms}"));
+            }
             receipt(
-                door.write(Kind::Memory, room, &text_of(a, "text")?, None, vec![format!("memory:{kind}")], op_of(a))?,
+                door.write(Kind::Memory, room, &text_of(a, "text")?, None, tags, op_of(a))?,
                 &format!("remembered, {kind}"),
             )
         }
@@ -4572,6 +4731,146 @@ mod tests {
         fn recorded_write(&self, op_id: &str) -> Result<Option<Value>> {
             Ok(self.answers.get(format!("recorded:{op_id}")).cloned())
         }
+    }
+
+    /// A seat scoped to its rooms (Dot, 4 Nov 2026) gets its inbox from its rooms; an addressed task stays listed until
+    /// the seat replies to it, and a progress line or diary of its own is not that reply (Emmy's review of b46d543).
+    #[test]
+    fn a_scoped_seat_keeps_an_addressed_task_until_it_replies_to_it() {
+        let rec = |id: &str, author: &str, ms: i64, tags: &[&str]| json!({"id": id, "author": author, "channel": "dot-game", "created_ms": ms, "seq": ms, "content": id, "tags": tags});
+        let door = Fake::new(json!({
+            "/whoami": {"handle": "dot-game", "server_ms": 100},
+            "/asks": {"__err": "server refused (403): dot-game is scoped to its rooms; GET /asks is not open to it"},
+            "/fold": {"__err": "server refused (403): dot-game is scoped to its rooms; GET /fold is not open to it"},
+            "/rooms/mine": {"rooms": [{"room": "dot-game"}]},
+            "/search": {"items": [
+                rec("t1", "emmy", 10, &["to:dot-game", "ask:act"]),
+                rec("t2", "emmy", 20, &["to:dot-game", "ask:act"]),
+                rec("p1", "dot-game", 30, &["intent:status"]),
+                rec("r2", "dot-game", 40, &["reply:t2"]),
+                rec("n1", "noor", 35, &[]),
+                rec("n2", "noor", 50, &[]),
+            ]}
+        }));
+        let v = inbox_value(&door, 20, Ack::Page, false).unwrap();
+        let mine: Vec<&str> = v["for_me"].as_array().unwrap().iter().filter_map(|i| i["id"].as_str()).collect();
+        assert_eq!(mine, vec!["t1"], "t1 waits (Dot's progress line is no answer); t2 was answered by its reply");
+        assert!(door.posts.borrow().is_empty(), "a scoped seat marks nothing read: /fold is not open to it");
+        assert_eq!(v["acked"], false);
+        assert!(v["scoped"].as_str().is_some_and(|n| n.contains("not a complete list")), "the page says what it is");
+        let page = v["page"].as_u64().unwrap();
+        assert_eq!(page, 2, "t1, and n2 after Dot's last word; n1 came before it");
+        assert_eq!(v["new"], 2, "NEW counts what the scoped page lists, never 0 beside listed records");
+    }
+
+    // ── Dot's review of Rocky's scoped-inbox candidates (b46d543, e76f1aa), run 4 Nov 2026, offline ──
+    // These call the real inbox_value -> fold_or_rooms. They use a fake door, so they prove the logic given
+    // these records, not that the live server returns these shapes or that anything is deployed.
+    fn dr_rec(id: &str, author: &str, ms: i64, tags: &[&str]) -> Value {
+        json!({"id": id, "author": author, "channel": "dot-game", "created_ms": ms, "seq": ms, "content": id, "tags": tags})
+    }
+    fn dr_answers(items: Value) -> Value {
+        json!({
+            "/whoami": {"handle": "dot-game", "server_ms": 1000},
+            "/asks": {"__err": "server refused (403): dot-game is scoped to its rooms; GET /asks is not open to it"},
+            "/fold": {"__err": "server refused (403): dot-game is scoped to its rooms; GET /fold is not open to it"},
+            "/rooms/mine": {"rooms": [{"room": "dot-game"}]},
+            "/search": {"items": items}
+        })
+    }
+    fn dr_listed(door: &dyn Door, limit: i64) -> (Vec<String>, Value) {
+        let v = inbox_value(door, limit, Ack::Page, false).unwrap();
+        let ids = v["for_me"].as_array().unwrap().iter().filter_map(|i| i["id"].as_str().map(str::to_owned)).collect();
+        (ids, v)
+    }
+    /// Serves /search?channel=..&limit=N like the real `recent`: the newest N rows, nothing about the rest here.
+    struct DrWindow { inner: Fake, all: Vec<Value> }
+    impl Door for DrWindow {
+        fn handle(&self) -> &str { self.inner.handle() }
+        fn get(&self, path: &str) -> Result<Value> {
+            if path.starts_with("/search?channel=") {
+                let n: usize = path.split("limit=").nth(1).and_then(|s| s.split('&').next()).and_then(|s| s.parse().ok()).unwrap_or(20);
+                let mut rows = self.all.clone();
+                rows.sort_by_key(|r| std::cmp::Reverse(r["created_ms"].as_i64().unwrap_or(0)));
+                let cut = rows.len() > n;
+                rows.truncate(n);
+                return Ok(json!({"count": rows.len(), "items": rows, "next_before": if cut { json!(1) } else { Value::Null }}));
+            }
+            self.inner.get(path)
+        }
+        fn get_bytes(&self, p: &str) -> Result<(String, Vec<u8>)> { self.inner.get_bytes(p) }
+        fn post(&self, p: &str, b: &Value) -> Result<Value> { self.inner.post(p, b) }
+        fn write(&self, k: Kind, r: &str, t: &str, c: Option<String>, g: Vec<String>, o: Option<String>) -> Result<Written> { self.inner.write(k, r, t, c, g, o) }
+        fn identity(&self) -> String { self.inner.identity() }
+        fn state(&self, r: &str) -> Result<Value> { self.inner.state(r) }
+        fn recorded_write(&self, o: &str) -> Result<Option<Value>> { self.inner.recorded_write(o) }
+    }
+
+    #[test]
+    fn dot_review_orient_progress_and_diary_do_not_hide_pending_tasks() {
+        let door = Fake::new(dr_answers(json!([
+            dr_rec("taskA", "emmy", 10, &["to:dot-game", "ask:act"]),
+            dr_rec("orient", "dot-game", 20, &["run:r1", "intent:result"]),
+            dr_rec("taskB", "emmy", 30, &["to:dot-game", "ask:act"]),
+            dr_rec("diary", "dot-game", 40, &["subject:s", "subject:dot-game.diary-with-evidence"]),
+            dr_rec("noise", "noor", 45, &[]),
+        ])));
+        let (ids, _) = dr_listed(&door, 20);
+        assert_eq!(ids, vec!["taskA", "taskB"], "own orient and diary must answer nothing");
+    }
+
+    #[test]
+    fn dot_review_only_my_reply_to_a_task_resolves_that_task() {
+        let door = Fake::new(dr_answers(json!([
+            dr_rec("taskA", "emmy", 10, &["to:dot-game"]),
+            dr_rec("taskB", "emmy", 20, &["to:dot-game"]),
+            dr_rec("taskC", "emmy", 30, &["to:dot-game"]),
+            dr_rec("rA", "dot-game", 40, &["reply:taskA"]),
+            dr_rec("othersReplyToB", "noor", 50, &["reply:taskB"]),
+            dr_rec("myReplyToStranger", "dot-game", 60, &["reply:someoneElsesMessage"]),
+        ])));
+        let (ids, _) = dr_listed(&door, 20);
+        assert_eq!(ids, vec!["taskB", "taskC"], "A answered by me; B answered only by someone else; C untouched");
+    }
+
+    /// DEFECT CANDIDATE (expected to FAIL on e76f1aa): addressing is compared with the exact tag to:{me}. Rocky's own
+    /// notes in #dot-game (-6eb94c280152) carry to:@dot-game.
+    #[test]
+    fn dot_review_at_prefixed_addressing_is_still_addressed_to_me() {
+        let door = Fake::new(dr_answers(json!([
+            dr_rec("atTask", "rocky", 10, &["to:@dot-game", "ask:read"]),
+            dr_rec("myDiary", "dot-game", 20, &["subject:s"]),
+        ])));
+        let (ids, _) = dr_listed(&door, 20);
+        assert_eq!(ids, vec!["atTask"], "a task addressed with @ vanished after my next post");
+        let door = Fake::new(dr_answers(json!([
+            dr_rec("atMention", "rocky", 10, &["mention:@dot-game"]),
+            dr_rec("myDiary", "dot-game", 20, &["subject:s"]),
+        ])));
+        let (ids, _) = dr_listed(&door, 20);
+        assert_eq!(ids, vec!["atMention"], "same for mention:@");
+    }
+
+    /// DEFECT CANDIDATE (expected to FAIL on e76f1aa): the room page is the newest N rows; older pending tasks fall off
+    /// it, and the result says has_more=false although the server gave next_before.
+    #[test]
+    fn dot_review_a_full_page_must_not_silently_drop_older_pending_tasks() {
+        let tasks: Vec<Value> = (1..=5).map(|n| dr_rec(&format!("task{n}"), "emmy", n * 10, &["to:dot-game"])).collect();
+        let door = DrWindow { inner: Fake::new(dr_answers(json!([]))), all: tasks };
+        let (ids, v) = dr_listed(&door, 3);
+        assert!(ids.len() == 5 || v["has_more"] == true, "5 pending tasks, window 3: listed {ids:?}, has_more={}", v["has_more"]);
+    }
+
+    /// CHARACTERIZATION (documents current behavior, not a verdict): any reply of mine counts as an answer, even a
+    /// progress line, because the tag carries no closing signal. Whether that is too broad is a spec decision.
+    #[test]
+    fn dot_review_characterize_a_progress_reply_counts_as_an_answer() {
+        let door = Fake::new(dr_answers(json!([
+            dr_rec("taskA", "emmy", 10, &["to:dot-game", "ask:act"]),
+            dr_rec("progress", "dot-game", 20, &["reply:taskA", "intent:status", "phase:blocked"]),
+        ])));
+        let (ids, _) = dr_listed(&door, 20);
+        assert!(ids.is_empty(), "current behavior: a blocked/progress record replying to taskA removes it from the inbox");
     }
 
     #[test]
@@ -5803,6 +6102,16 @@ mod tests {
         assert!(brief_text(&mk(45)).unwrap().contains("BRIDGE     last to @blaze 45m ago · OBS-told · OVERDUE"));
         let none = Fake::new(json!({"/whoami": {"handle": "rocky"}, "/fold": {"items": []}, "/states": {"heads": []}, "/search?tag=to%3Ablaze": {"items": []}}));
         assert!(brief_text(&none).unwrap().contains("BRIDGE     nothing to @blaze on record"));
+        // the card format is in every brief, right under NOW, and it is one the contract accepts
+        let nb = brief_text(&none).unwrap();
+        assert!(nb.contains("TELL       the owner reads the Bridge"), "{nb}");
+        assert!(nb.contains("\n  decide   ox tell ") && nb.contains("\n  check    signed:ok"), "{nb}");
+        assert!(TELL_BLOCK.contains("at most 80 characters"));
+        for flag in ["--ask decide", "--option", "--recommend", "--why", "--by", "--affects \"<who>: <how>\"", "--absent \"<who>: <why>\"", "--owed", "#ask"] {
+            assert!(TELL_BLOCK.contains(flag), "{flag}");
+        }
+        let opts = vec!["Ship it".to_string(), "Hold it".to_string()];
+        assert!(tell_problems("Ship it?", "decide", &opts, Some("1d"), Some(1), Some("why")).is_empty());
     }
 
     #[test]
@@ -6179,6 +6488,21 @@ mod tests {
     }
 
     #[test]
+    fn recall_answerable_reads_the_pre_flight_instead_of_the_hits() {
+        let f = Fake::new(json!({"/answerable": {"schema": "answerable/1", "verdict": "partial", "says": "on record: lattice; not on record: quasar",
+            "next": "recall what is on record, and say what is not", "missing": ["quasar"],
+            "words": [{"word": "lattice", "records": 2, "approved": 1}, {"word": "quasar", "records": 0, "approved": 0}],
+            "all_words": {"records": 0, "approved": [], "others": []},
+            "graph": {"nodes": [{"title": "company of agents", "certification": "partial", "approved": 1, "readings": 2}], "records": ["OBS-cortex-1"]}}}));
+        let t = call(&f, "oracle_recall", &json!({"query": "lattice quasar", "answerable": true, "room": "#dot"})).unwrap();
+        assert!(t.starts_with("ANSWERABLE  PARTIAL  on record: lattice; not on record: quasar"), "{t}");
+        assert!(t.contains("lattice 2 (1 approved) · quasar 0"), "{t}");
+        assert!(t.contains("graph     OBS-cortex-1") && t.contains("company of agents (partial 1/2)"), "{t}");
+        assert!(t.ends_with("next      recall what is on record, and say what is not"), "{t}");
+        assert_eq!(f.gets.borrow().last().unwrap(), "/answerable?q=lattice%20quasar&room=dot");
+    }
+
+    #[test]
     fn where_lists_the_rooms_with_counts_and_dates_and_says_when_there_are_none() {
         let f = Fake::new(json!({"/search": {"items": [], "rooms": [
             {"room": "illuminati", "count": 34, "first_ms": 1_780_185_600_000_i64, "last_ms": 1_782_000_000_000_i64},
@@ -6286,6 +6610,7 @@ mod tests {
         assert_eq!(text.matches("  reply  #").count(), 10, "ten listed in the text too: {text}");
         assert!(text.contains("+ 15 more: #axxis 8 · #dot 7 — ox asks --mine lists every one"), "{text}");
         assert!(text.contains("CORTEX     2487 approved nodes · 440 marks waiting on Blaze's verdict"), "{text}");
+        assert!(!text.contains("LAW "), "a server without cortex_law is never asked: {text}");
         // full keeps every row.
         let full = handle(&f, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "oracle_brief", "arguments": {"full": true}}}), false).unwrap()["result"].clone();
         assert_eq!(full["structuredContent"]["asks"]["rows"].as_array().map(Vec::len), Some(25));
@@ -6302,6 +6627,29 @@ mod tests {
         assert!(brief_render(&d, false).contains("CORTEX     could not be counted: server refused (500)"));
         // The inbox keeps the server's local clock too.
         assert_eq!(inbox_value(&f, 5, Ack::No, false).unwrap()["local"], "09:30 (+05:30)");
+    }
+
+    // Noor, 3 Nov 2026: what Blaze approved as Rule, Profile or Preference wakes with every seat.
+    #[test]
+    fn the_brief_carries_the_law_blaze_approved_bounded_and_says_when_it_cannot_read_it() {
+        let now = 1_793_340_000_000i64;
+        let lines: Vec<Value> = (0..3).map(|i| json!({"code": format!("OBS-cortex-20261103-00000000000{i}"), "line": format!("rule {i}"), "linked": 3 - i})).collect();
+        let base = || json!({"/whoami": {"handle": "rocky", "server_ms": now, "features": ["cortex_count", "cortex_law"]},
+            "/fold": {"items": [], "pending": {}}, "/states": {"heads": []}, "/asks": {"waiting_on_me": []},
+            "/cortex/law": {"schema": "cortex-law/1", "total": 292, "shown": 3, "lines": lines},
+            "/cortex": {"schema": "cortex-count/1", "approved_nodes": 1, "pending_marks": 0}});
+        let f = Fake::new(base());
+        let v = brief_value(&f, false).unwrap();
+        assert!(f.gets.borrow().iter().any(|g| g == &format!("/cortex/law?top={LAW_BRIEF_TOP}")), "{:?}", f.gets.borrow());
+        let text = brief_render(&v, false);
+        assert!(text.contains("LAW        292 readings Blaze approved as Rule, Profile or Preference · the 3 most linked here; every one: ox brief --full"), "{text}");
+        assert!(text.contains("  - rule 0 (000000000000)\n  - rule 1 (000000000001)"), "most linked first, each with its code: {text}");
+        let full = Fake::new(base());
+        brief_value(&full, true).unwrap();
+        assert!(full.gets.borrow().iter().any(|g| g == "/cortex/law?top=10000"), "--full asks for every line: {:?}", full.gets.borrow());
+        let mut down = base();
+        down["/cortex/law"] = json!({"__err": "server refused (500): fold failed"});
+        assert!(brief_render(&brief_value(&Fake::new(down), false).unwrap(), false).contains("LAW        could not be read: server refused (500)"));
     }
 
     // Rocky's live pass, 1 Nov 2026 07:15Z: `oracle_inbox mine=true limit=5` answered 86 KB: the limit bounded only the fold's page.

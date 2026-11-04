@@ -5,12 +5,19 @@
 //! answers the same query in ~175 ms on 8 threads of this CPU. The vectors are the same model's (cosine 0.99999 with
 //! Ollama's), so the existing index stays valid and Oracle only changes `ORACLE_EMBED_URL`.
 //!
-//! `oracle-embed --model <dir with config.json, tokenizer.json, model.safetensors> [--bind 127.0.0.1:11436]`.
+//! `oracle-embed --model <dir with config.json, tokenizer.json, model.safetensors> [--reranker <dir>] [--bind 127.0.0.1:11436]`.
 //! Pooling is the first token (the model's `1_Pooling`: cls), then unit length. Threads: `RAYON_NUM_THREADS`.
+//!
+//! `--reranker` (3 Nov 2026) also holds a cross-encoder (a BERT sequence classifier such as cross-encoder/ms-marco-MiniLM-L-6-v2)
+//! behind `POST /api/rerank {query, documents}` -> `{scores}`: one relevance score per document, read with the query in one
+//! pass, higher is better. Why: on 20 real moments Oracle's recall put the answer in the top 5 for 12, Hindsight for 19, and
+//! Hindsight's order comes from exactly this reranker; three of our misses were in the top 20.
 use anyhow::{Context, Result};
 use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
+use candle_nn::Module;
+use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use candle_transformers::models::xlm_roberta::{Config, XLMRobertaModel};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -88,6 +95,65 @@ impl Embedder {
     }
 }
 
+/// A cross-encoder: a BERT encoder, its pooler (dense + tanh on the first token) and a one-logit classifier.
+struct Reranker {
+    model: BertModel,
+    pooler: candle_nn::Linear,
+    classifier: candle_nn::Linear,
+    tokenizer: Tokenizer,
+    name: String,
+}
+
+/// A query and a document together, in tokens, at most (the model's positions).
+const RERANK_TOKENS: usize = 512;
+/// Pairs scored in one padded pass.
+const RERANK_BATCH: usize = 16;
+
+impl Reranker {
+    fn load(dir: &std::path::Path) -> Result<Reranker> {
+        let cfg: BertConfig = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?).context("config.json")?;
+        let mut tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow::anyhow!("tokenizer.json: {e}"))?;
+        tokenizer.with_truncation(Some(tokenizers::TruncationParams { max_length: RERANK_TOKENS, strategy: tokenizers::TruncationStrategy::OnlySecond, ..Default::default() }))
+            .map_err(|e| anyhow::anyhow!("truncation: {e}"))?;
+        tokenizer.with_padding(None);
+        // Safety: as for the embedder, a read-only weights file.
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[dir.join("model.safetensors")], DType::F32, &Device::Cpu)? };
+        let model = BertModel::load(vb.clone(), &cfg)?;
+        let h = cfg.hidden_size;
+        let pooler = candle_nn::linear(h, h, vb.pp("bert.pooler.dense"))?;
+        let classifier = candle_nn::linear(h, 1, vb.pp("classifier"))?;
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(Reranker { model, pooler, classifier, tokenizer, name })
+    }
+
+    /// One score per document for `query`, in the documents' order.
+    fn scores(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
+        let mut out = Vec::with_capacity(docs.len());
+        for chunk in docs.chunks(RERANK_BATCH) {
+            let encs: Vec<tokenizers::Encoding> = chunk.iter()
+                .map(|d| self.tokenizer.encode((query, d.as_str()), true).map_err(|e| anyhow::anyhow!("tokenize: {e}")))
+                .collect::<Result<_>>()?;
+            let len = encs.iter().map(|e| e.get_ids().len()).max().unwrap_or(1).max(1);
+            let (mut ids, mut types, mut mask) = (vec![], vec![], vec![]);
+            for e in &encs {
+                let n = e.get_ids().len();
+                ids.extend(e.get_ids().iter().copied().chain(std::iter::repeat_n(0, len - n)));
+                types.extend(e.get_type_ids().iter().copied().chain(std::iter::repeat_n(0, len - n)));
+                mask.extend(std::iter::repeat_n(1u32, n).chain(std::iter::repeat_n(0, len - n)));
+            }
+            let b = encs.len();
+            let ids = Tensor::from_vec(ids, (b, len), &Device::Cpu)?;
+            let types = Tensor::from_vec(types, (b, len), &Device::Cpu)?;
+            let mask = Tensor::from_vec(mask, (b, len), &Device::Cpu)?;
+            let hidden = self.model.forward(&ids, &types, Some(&mask))?;
+            let cls = hidden.narrow(1, 0, 1)?.squeeze(1)?;
+            let logits = self.classifier.forward(&self.pooler.forward(&cls)?.tanh()?)?;
+            out.extend(logits.squeeze(1)?.to_vec1::<f32>()?);
+        }
+        Ok(out)
+    }
+}
+
 /// The model's one worker: takes every request waiting, embeds their short texts together in passes of up to
 /// BATCH_MAX and each long one alone, and answers each request (2026-10-10: Grok searched in bursts of three a second
 /// and requests served one at a time queued past Oracle's 2.5 s budget; 34 of 96 searches fell back to keyword).
@@ -141,6 +207,28 @@ fn worker(e: Arc<Embedder>, rx: std::sync::mpsc::Receiver<Job>) {
 struct Served {
     name: String,
     jobs: std::sync::Mutex<std::sync::mpsc::Sender<Job>>,
+    reranker: Option<Arc<Reranker>>,
+}
+
+#[derive(Deserialize)]
+struct RerankReq {
+    query: String,
+    documents: Vec<String>,
+}
+
+/// The most documents one rerank takes.
+const RERANK_MAX: usize = 200;
+
+async fn rerank(State(e): State<Arc<Served>>, Json(req): Json<RerankReq>) -> Result<Json<Value>, (StatusCode, String)> {
+    let r = e.reranker.clone().ok_or((StatusCode::NOT_FOUND, "no reranker loaded (--reranker <dir>)".to_string()))?;
+    if req.documents.len() > RERANK_MAX {
+        return Err((StatusCode::BAD_REQUEST, format!("at most {RERANK_MAX} documents")));
+    }
+    let started = std::time::Instant::now();
+    let scores = tokio::task::spawn_blocking(move || r.scores(&req.query, &req.documents))
+        .await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "the reranker stopped".to_string()))?
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(json!({"model": e.reranker.as_ref().map(|r| r.name.clone()), "scores": scores, "total_duration": started.elapsed().as_nanos() as u64})))
 }
 
 #[derive(Deserialize)]
@@ -177,10 +265,21 @@ async fn main() -> Result<()> {
     e.embed("warm")?;
     eprintln!("oracle-embed {} loaded in {:.1}s, listening on {bind}", e.name, t.elapsed().as_secs_f32());
     let (tx, rx) = std::sync::mpsc::channel::<Job>();
-    let served = Arc::new(Served { name: e.name.clone(), jobs: std::sync::Mutex::new(tx) });
+    let reranker = match arg("--reranker") {
+        Some(d) => {
+            let t = std::time::Instant::now();
+            let r = Reranker::load(std::path::Path::new(&d))?;
+            r.scores("warm", &["warm".into()])?;
+            eprintln!("oracle-embed reranker {} loaded in {:.1}s", r.name, t.elapsed().as_secs_f32());
+            Some(Arc::new(r))
+        }
+        None => None,
+    };
+    let served = Arc::new(Served { name: e.name.clone(), jobs: std::sync::Mutex::new(tx), reranker });
     std::thread::spawn(move || worker(e, rx));
     let app = Router::new()
         .route("/api/embed", post(embed))
+        .route("/api/rerank", post(rerank))
         .route("/health", get(|| async { "ok" }))
         .with_state(served);
     let listener = tokio::net::TcpListener::bind(&bind).await?;

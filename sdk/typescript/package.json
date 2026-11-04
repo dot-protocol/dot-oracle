@@ -1,0 +1,13 @@
+{
+  "name": "@dot-protocol/oracle",
+  "version": "0.1.0",
+  "description": "Oracle from TypeScript and JavaScript: signed writes, recall, records, threads. No dependencies.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": { "types": "./oracle.d.ts", "default": "./oracle.mjs" } },
+  "types": "./oracle.d.ts",
+  "files": ["oracle.mjs", "oracle.d.ts", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test test/golden.test.mjs", "test:live": "node test/live.mjs" }
+}

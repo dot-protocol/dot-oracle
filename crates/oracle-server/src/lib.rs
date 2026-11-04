@@ -1,5 +1,7 @@
 //! Oracle server library: the store (all data rules) and the HTTP layer over it.
 pub mod alias;
+pub mod answerable;
+pub mod extract;
 pub mod asks;
 pub mod cards;
 pub mod claims;
@@ -17,6 +19,7 @@ pub mod legacy;
 pub mod lifecycle;
 pub mod mcp;
 pub mod metrics;
+pub mod minds;
 pub mod fold_cache;
 pub mod oauth;
 pub mod privaterooms;
@@ -38,4 +41,5 @@ pub mod sync;
 pub mod tasks;
 pub mod terms;
 pub mod typeaddr;
+pub mod room_page;
 pub mod world;

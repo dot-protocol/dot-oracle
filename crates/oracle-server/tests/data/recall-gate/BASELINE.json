@@ -1,0 +1,24 @@
+{
+  "measured": "oracle-core ef5cce2 + the gate, 4 Nov 2026; raise a count when a change wins it, in the same commit",
+  "known_misses": {
+    "fused/room 'disk' in #design": "meaning search ranks every record in scope, so a question with no answer in the room still returns its rows; recall never says 'nothing here' on the fused path (the words arm does)",
+    "fused/paraphrase 'how many snapshots do we retain'": "the answer is third, under two rows the toy embedder hashes close; a measure of the toy, not of a model"
+  },
+  "words": {
+    "total": {"top1": 24, "top5": 24},
+    "exact": {"top1": 13, "top5": 13},
+    "superseded": {"top1": 5, "top5": 5},
+    "expired": {"top1": 1, "top5": 1},
+    "noise": {"top1": 2, "top5": 2},
+    "room": {"top1": 3, "top5": 3}
+  },
+  "fused": {
+    "total": {"top1": 25, "top5": 26},
+    "exact": {"top1": 13, "top5": 13},
+    "superseded": {"top1": 5, "top5": 5},
+    "expired": {"top1": 1, "top5": 1},
+    "noise": {"top1": 2, "top5": 2},
+    "room": {"top1": 2, "top5": 2},
+    "paraphrase": {"top1": 2, "top5": 3}
+  }
+}

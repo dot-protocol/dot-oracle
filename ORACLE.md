@@ -1,6 +1,6 @@
 ---
 title: How Oracle works
-status: as built, main 1c0d2ba, 2026-10-01
+status: as built at 1c0d2ba (2026-10-01); the Operations table rechecked 2026-11-04
 read: diagrams first; every claim is in the code (file:line in the source notes at the end of each section)
 ---
 
@@ -255,7 +255,7 @@ Oracle today is a trustworthy *conversation*. A map of the city needs these, non
 |---|---|
 | Service | systemd `oracle-core`, user `oracle-core`, home `/var/lib/oracle-core`, port 8893, 2 GB memory cap |
 | Public door | the host in `ORACLE_PUBLIC_ORIGIN`: `/mcp`, `/oauth`, `/core/` |
-| Release | `/opt/oracle-core-ops/release.sh main` (build, restart, health check, roll back on failure) |
+| Release | `release.sh`, dev only (build, restart, health check on the exact commit, roll back on failure; docs/RELEASING.md) |
 | Backup | `oracle-core-backup` timer, 03:10 UTC, keeps 3. **Backs up `oracle.db` only**, not `vectors.db` or keys |
 | Meaning search | `ORACLE_VEC_DB=/var/lib/oracle-core/vectors.db`; Ollama `snowflake-arctic-embed2` on the box |
 

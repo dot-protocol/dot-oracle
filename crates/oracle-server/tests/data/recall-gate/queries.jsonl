@@ -1,0 +1,27 @@
+{"q":"backup copies database","expect":["o2"],"cat":"superseded","arm":"both"}
+{"q":"rate limit public writes per minute","expect":["o9"],"cat":"superseded","arm":"both"}
+{"q":"build machine disk full","expect":["o6"],"cat":"superseded","arm":"both"}
+{"q":"planning meeting","expect":["s5"],"cat":"superseded","arm":"both"}
+{"q":"old archive import","expect":["s3"],"cat":"superseded","arm":"both"}
+{"q":"holiday freeze production releases","expect":["s7"],"cat":"expired","arm":"both"}
+{"q":"deploy script refuses branch","expect":["o3"],"cat":"exact","arm":"both"}
+{"q":"certificate expires","expect":["o7"],"cat":"exact","arm":"both"}
+{"q":"p95 search latency on-call","expect":["o10"],"cat":"exact","arm":"both"}
+{"q":"retention sweep feed records","expect":["o11"],"cat":"exact","arm":"both"}
+{"q":"tokens mode 0600","expect":["o12"],"cat":"exact","arm":"both"}
+{"q":"corners pill","expect":["d1"],"cat":"exact","arm":"both"}
+{"q":"accent colour green","expect":["d2"],"cat":"exact","arm":"both"}
+{"q":"icon-only buttons label","expect":["d4"],"cat":"noise","arm":"both"}
+{"q":"newest message input box","expect":["d5"],"cat":"exact","arm":"both"}
+{"q":"reciprocal rank fusion","expect":["r1"],"cat":"exact","arm":"both"}
+{"q":"reranker first-place answers","expect":["r2"],"cat":"exact","arm":"both"}
+{"q":"LongMemEval hit@5","expect":["r3"],"cat":"exact","arm":"both"}
+{"q":"cross-encoder seconds per query","expect":["r4"],"cat":"exact","arm":"both"}
+{"q":"PageRank citations","expect":["r5"],"cat":"exact","arm":"both"}
+{"q":"search module","expect":["n3","n2"],"cat":"noise","arm":"both"}
+{"q":"primary action thumb","room":"design","expect":["d3"],"cat":"room","arm":"both"}
+{"q":"disk","room":"design","expect":[],"cat":"room","arm":"both"}
+{"q":"CPU","room":"research","expect":["r4","r6","r7","n10"],"cat":"room","arm":"both"}
+{"q":"how many snapshots do we retain","expect":["o2"],"cat":"paraphrase","arm":"meaning"}
+{"q":"rounded edges on controls","expect":["d1"],"cat":"paraphrase","arm":"meaning"}
+{"q":"approval should not hide recent information","expect":["r8"],"cat":"paraphrase","arm":"meaning"}

@@ -13,8 +13,11 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dot-oracle-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     Write-Host "downloading $url"
-    Invoke-WebRequest -Uri $url -OutFile "$tmp\oracle.zip" -UseBasicParsing -TimeoutSec 120
-    Invoke-WebRequest -Uri "$url.sha256" -OutFile "$tmp\sum" -UseBasicParsing -TimeoutSec 60
+    # The same words as install.sh, so a failed download says what failed and that nothing changed.
+    try { Invoke-WebRequest -Uri $url -OutFile "$tmp\oracle.zip" -UseBasicParsing -TimeoutSec 120 }
+    catch { throw "download failed: $url; nothing installed ($($_.Exception.Message))" }
+    try { Invoke-WebRequest -Uri "$url.sha256" -OutFile "$tmp\sum" -UseBasicParsing -TimeoutSec 60 }
+    catch { throw "checksum download failed; nothing installed ($($_.Exception.Message))" }
     $want = ((Get-Content "$tmp\sum" -TotalCount 1).Trim() -split '\s+')[0].ToLower()
     if ($want -notmatch '^[0-9a-f]{64}$') { throw 'invalid checksum; nothing installed' }
     $have = (Get-FileHash "$tmp\oracle.zip" -Algorithm SHA256).Hash.ToLower()
@@ -29,6 +32,7 @@ try {
         Write-Host "added $dest to your PATH; open a new terminal to use oracle and ox"
     }
     $env:Path = "$dest;$env:Path"
+    Write-Host "next: oracle up"
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

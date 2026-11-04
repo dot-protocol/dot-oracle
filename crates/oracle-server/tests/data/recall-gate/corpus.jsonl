@@ -1,0 +1,46 @@
+{"key":"o1","room":"ops","who":"ana","mins":0,"text":"The nightly backup runs at 03:10 UTC and keeps three copies of the database."}
+{"key":"o2","room":"ops","who":"ben","mins":900,"text":"Backups now keep seven copies of the database; three was not enough after the disk failure.","tags":["supersedes:@o1"]}
+{"key":"o3","room":"ops","who":"ana","mins":20,"text":"The deploy script refuses any branch but dev and rolls back when the health check fails."}
+{"key":"o4","room":"ops","who":"cleo","mins":40,"text":"Port 8900 is the default for the local server; production listens on 8893 behind the proxy."}
+{"key":"o5","room":"ops","who":"ben","mins":60,"text":"The disk on the build machine is 82% full; the Rust target directory alone is 40 GB."}
+{"key":"o6","room":"ops","who":"ana","mins":1200,"text":"Cleared the old build caches: the build machine disk is back to 51% full.","tags":["supersedes:@o5"]}
+{"key":"o7","room":"ops","who":"cleo","mins":80,"text":"The certificate for the public door expires on 12 March; renewal is automatic through the ACME client."}
+{"key":"o8","room":"ops","who":"ben","mins":100,"text":"The rate limit for public writes is 30 per minute per seat."}
+{"key":"o9","room":"ops","who":"ana","mins":1300,"text":"The rate limit for public writes was raised to 60 per minute per seat after the import job hit it.","tags":["supersedes:@o8"]}
+{"key":"o10","room":"ops","who":"cleo","mins":120,"text":"Monitoring pages the on-call seat when p95 search latency stays above 3 seconds for ten minutes."}
+{"key":"o11","room":"ops","who":"ben","mins":140,"text":"The retention sweep removes feed records older than 48 hours; other rooms keep everything."}
+{"key":"o12","room":"ops","who":"ana","mins":160,"text":"Tokens are written to files with mode 0600 and are never printed."}
+{"key":"d1","room":"design","who":"cleo","mins":200,"text":"Corners are 4 px on surfaces and 3 px on controls; no pill shapes anywhere."}
+{"key":"d2","room":"design","who":"ana","mins":220,"text":"One accent colour, green, and it only means live or current."}
+{"key":"d3","room":"design","who":"ben","mins":240,"text":"The phone layout keeps the primary action in the bottom bar, within thumb reach."}
+{"key":"d4","room":"design","who":"cleo","mins":260,"text":"Icon-only buttons need a label that shows on hover, keyboard focus and touch."}
+{"key":"d5","room":"design","who":"ana","mins":280,"text":"The chat view puts the newest message next to the input box, like a messaging app."}
+{"key":"d6","room":"design","who":"ben","mins":300,"text":"The type scale is 1.20 from 17 px, and nothing is set below 13 px."}
+{"key":"d7","room":"design","who":"cleo","mins":320,"text":"Dark mode shows depth with luminance steps instead of borders."}
+{"key":"d8","room":"design","who":"ana","mins":340,"text":"Labels on the map were hidden because they covered the route line; buttons there keep their icons."}
+{"key":"r1","room":"research","who":"ben","mins":400,"text":"Hybrid recall fuses BM25 word search and embedding search with reciprocal rank fusion."}
+{"key":"r2","room":"research","who":"cleo","mins":420,"text":"On the twenty real moments, the reranker moved first-place answers from 13 to 18."}
+{"key":"r3","room":"research","who":"ana","mins":440,"text":"LongMemEval session hit@5 was 0.966 on the cleaned dataset: retrieval only, no reader model."}
+{"key":"r4","room":"research","who":"ben","mins":460,"text":"The cross-encoder reranker adds about four seconds per query on a CPU."}
+{"key":"r5","room":"research","who":"cleo","mins":480,"text":"PageRank over citations gave no gain when fused and made results worse when multiplied."}
+{"key":"r6","room":"research","who":"ana","mins":500,"text":"Competitor survey: most memory systems need a language model to extract facts, which is slow on a CPU."}
+{"key":"r7","room":"research","who":"ben","mins":520,"text":"The embedding model is snowflake arctic embed, run locally on the CPU."}
+{"key":"r8","room":"research","who":"cleo","mins":540,"text":"Approved records should be a boost, not a tier that buries today's facts."}
+{"key":"r9","room":"research","who":"ana","mins":560,"text":"Abstention questions have no answer session and are left out of hit@5."}
+{"key":"s1","room":"standup","who":"ana","mins":600,"text":"Today: finishing the installer edge cases; blocked on nothing."}
+{"key":"s2","room":"standup","who":"ben","mins":620,"text":"Yesterday the import of the old archive stalled at 40%; rerunning it tonight."}
+{"key":"s3","room":"standup","who":"cleo","mins":1400,"text":"The old archive import finished: 8,299 records, every signature verified."}
+{"key":"s4","room":"standup","who":"ben","mins":660,"text":"The planning meeting moved to Thursday at 10:00."}
+{"key":"s5","room":"standup","who":"ana","mins":1500,"text":"The planning meeting is back on Wednesday at 10:00.","tags":["supersedes:@s4"]}
+{"key":"s6","room":"standup","who":"cleo","mins":700,"text":"Holiday freeze: no production releases from 20 December to 3 January.","valid_until_mins":1000}
+{"key":"s7","room":"standup","who":"ben","mins":1600,"text":"Production releases are open again; the holiday freeze is over."}
+{"key":"n1","room":"standup","who":"ana","mins":720,"text":"Working on the map today, mostly the route drawer."}
+{"key":"n2","room":"standup","who":"ben","mins":740,"text":"Reviewing pull requests for the server and the search module."}
+{"key":"n3","room":"standup","who":"cleo","mins":760,"text":"Fixed a flaky test in the search module; it waited on a clock."}
+{"key":"n4","room":"standup","who":"ana","mins":780,"text":"Pairing with ben on the database migration this afternoon."}
+{"key":"n5","room":"standup","who":"ben","mins":800,"text":"The import job is slow today; looking at it after lunch."}
+{"key":"n6","room":"ops","who":"cleo","mins":820,"text":"Restarted the server after the config change; health check green."}
+{"key":"n7","room":"ops","who":"ana","mins":840,"text":"The proxy logs rotate daily and keep a week."}
+{"key":"n8","room":"design","who":"ben","mins":860,"text":"New screenshots of the phone layout are in the design folder."}
+{"key":"n9","room":"research","who":"cleo","mins":880,"text":"Reading two papers on memory consolidation this week."}
+{"key":"n10","room":"research","who":"ana","mins":890,"text":"The search benchmark run is queued for tonight on the CPU box."}

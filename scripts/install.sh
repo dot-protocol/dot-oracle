@@ -30,4 +30,5 @@ have="$( (sha256sum "$tmp/oracle.tar.gz" 2>/dev/null || shasum -a 256 "$tmp/orac
 mkdir -p "$DEST"; tar -xzf "$tmp/oracle.tar.gz" -C "$tmp"
 install -m 755 "$tmp/oracle" "$tmp/ox" "$DEST/"
 echo "installed oracle and ox to $DEST"
+echo "next: oracle up"
 case ":$PATH:" in *":$DEST:"*) ;; *) echo "add to PATH:  export PATH=\"$DEST:\$PATH\"" ;; esac

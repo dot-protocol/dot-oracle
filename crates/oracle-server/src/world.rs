@@ -21,6 +21,11 @@ pub const DECISIONS_MAX: usize = 8;
 pub const DECISIONS_DAYS: i64 = 7;
 pub const SEATS_MAX: usize = 6;
 pub const QUESTIONS_MAX: usize = 8;
+/// The one door (Blaze, 4 Nov 2026, on Noor's card: "every room's State + every seat's NOW on one screen"): every room
+/// with a signed State, and every seat's newest NOW, whole lists for a screen; the text page shows the first few.
+pub const ROOMS_MAX: usize = 120;
+pub const ROOMS_DAYS: i64 = 60;
+pub const MINDS_MAX: usize = 60;
 
 fn cargo_of(o: &Observation) -> Value {
     o.cargo.as_deref().and_then(|c| serde_json::from_str(c).ok()).unwrap_or(Value::Null)
@@ -120,6 +125,36 @@ pub fn compose(s: &Store, now_ms: i64) -> Result<Value> {
     let seats_more = with_state.len().saturating_sub(SEATS_MAX);
     with_state.truncate(SEATS_MAX);
 
+    // EVERY ROOM: each open room touched in the last ROOMS_DAYS whose State is signed: its current and next lines.
+    let since = now_ms - ROOMS_DAYS * 86_400_000;
+    let mut rooms: Vec<Value> = vec![];
+    for (room, _, at, _) in s.channels()?.into_iter().filter(|(r, _, at, _)| *at >= since && open(r)) {
+        let rv = s.with_conn(|c| room_revisions(c, &room, None))?;
+        let heads = rv.heads();
+        let Some(head) = rv.revisions.iter().filter(|r| heads.contains(&r.id)).max_by_key(|r| r.seq) else { continue };
+        let f = |k: &str| first_sentence(head.fields[k].as_str().unwrap_or(""));
+        rooms.push(json!({"room": room, "id": head.id, "purpose": f("purpose"), "current": f("current"), "next": f("next"),
+            "state_at_ms": head.created_ms, "active_ms": at, "degraded": heads.len() > 1 || !rv.bad.is_empty()}));
+        if rooms.len() >= ROOMS_MAX {
+            break;
+        }
+    }
+
+    // EVERY MIND'S NOW: each seat's newest now/1, written by it in its own room (docs/NOW.md): what it is on, what is next.
+    let mut seen_now: BTreeSet<String> = BTreeSet::new();
+    let mut minds: Vec<Value> = vec![];
+    for o in s.by_tag("now", 600)?.into_iter().filter(|o| own(o) && open(&o.channel)) {
+        let c = cargo_of(&o);
+        if c["schema"] != "now/1" || !seen_now.insert(o.author.clone()) {
+            continue;
+        }
+        let f = |k: &str| first_sentence(c[k].as_str().unwrap_or(""));
+        minds.push(json!({"seat": o.author, "id": o.id, "room": o.channel, "task": f("task"), "next": f("next"), "waiting": f("waiting"), "at_ms": o.created_ms}));
+        if minds.len() >= MINDS_MAX {
+            break;
+        }
+    }
+
     // OPEN QUESTIONS: the decide asks addressed to the owner that nobody has answered, oldest first.
     let (questions, questions_more, capped) = match &owner {
         Some(o) => {
@@ -140,6 +175,8 @@ pub fn compose(s: &Store, now_ms: i64) -> Result<Value> {
         "projects": {"items": projects, "more": projects_more, "rest": "ox head --all (oracle_task owner=*)"},
         "decisions": {"items": decisions, "more": decisions_more, "days": DECISIONS_DAYS, "rest": "ox recall --room memory decision (oracle_read room=memory tag=memory:decision)"},
         "seats": {"items": with_state, "more": seats_more, "rest": "ox state <seat>"},
+        "rooms": {"items": rooms, "days": ROOMS_DAYS, "rest": "ox state <room>"},
+        "minds": {"items": minds, "rest": "ox now --seat <seat>"},
         "questions": {"items": questions, "more": questions_more, "capped": capped, "rest": "ox asks --seat <owner> (oracle_inbox as the owner)"},
         "next": ["ox plan <room> <name>", "ox get <id>"],
     }))

@@ -15,13 +15,14 @@ Performance claims come with a number from `cargo run --release --bin oracle-ben
 
 ## Branches
 
-Two branches, nothing else:
+Two branches, nothing else (docs/RELEASING.md):
 
-- **`main`** is what runs. It only ever moves forward to a commit that is live.
-- **`dev`** is where everyone works — every agent and every person, on the same branch. Pull
-  before you start, commit small, push often, rebase on conflict. A release takes `dev` to `main`.
+- **`dev`** is the default branch and where everyone works — every agent and every person, on the
+  same branch. Pull before you start, commit small, push often, rebase on conflict.
+- **`prod`** is what a live server runs. It only ever moves forward, to a dev commit that was
+  released. A public release is a tag `vX.Y.Z` on such a commit, built by the release workflow.
 
 No branch per agent, per feature or per session: parallel branches are how work gets lost and
-live drifts from `main`. Something you are unsure of goes behind a flag or into a draft commit
+live drifts from `prod`. Something you are unsure of goes behind a flag or into a draft commit
 on `dev`, not onto a new branch. Old branches were folded into `dev` on 2026-09-22 and are kept as
 `archive/*` tags.

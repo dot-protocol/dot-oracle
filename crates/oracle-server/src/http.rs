@@ -279,9 +279,9 @@ pub(crate) fn view_as(headers: &HeaderMap) -> Option<String> {
 pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/health"), ("GET", "/whoami"), ("GET", "/terms"), ("GET", "/experiments"), ("POST", "/observations"), ("GET", "/chain/:author"), ("GET", "/chain/:author/head"), ("GET", "/search"), ("GET", "/types"), ("GET", "/threads"),
     ("GET", "/asks"), ("GET", "/delta"), ("GET", "/world"),
-    ("GET", "/claims"), ("GET", "/cortex"), ("GET", "/cortex/node/:nid"), ("GET", "/cortex/entity/:name"), ("GET", "/cortex/marks"), ("GET", "/cortex/cases"), ("GET", "/cortex/case/:n"), ("POST", "/cortex/drafts"), ("GET", "/graph"), ("GET", "/files"), ("PUT", "/files"), ("GET", "/files/:id"), ("GET", "/files/:id/meta"), ("GET", "/hallway"), ("GET", "/ask"), ("GET", "/public/search"), ("GET", "/public/obs/:id"), ("GET", "/public/obs/:id/envelope"), ("GET", "/public/register/challenge"),
+    ("GET", "/claims"), ("GET", "/cortex"), ("GET", "/cortex/node/:nid"), ("GET", "/cortex/entity/:name"), ("GET", "/cortex/law"), ("GET", "/minds"), ("GET", "/minds/:handle"), ("GET", "/answerable"), ("POST", "/extract"), ("POST", "/reflect"), ("GET", "/cortex/marks"), ("GET", "/cortex/cases"), ("GET", "/cortex/case/:n"), ("POST", "/cortex/drafts"), ("GET", "/graph"), ("GET", "/files"), ("PUT", "/files"), ("GET", "/files/:id"), ("GET", "/files/:id/meta"), ("GET", "/hallway"), ("GET", "/ask"), ("GET", "/public/search"), ("GET", "/public/obs/:id"), ("GET", "/public/obs/:id/envelope"), ("GET", "/public/register/challenge"),
     ("POST", "/public/register"),
-    ("GET", "/public/rooms"), ("GET", "/public/room/:room"), ("GET", "/tasks"), ("GET", "/cards"), ("GET", "/rooms/:ch/messages"), ("GET", "/rooms/:ch/view"), ("GET", "/rooms/mine"), ("GET", "/rooms/:ch/state"), ("GET", "/rooms/:ch/map"), ("GET", "/maps"), ("GET", "/rooms/:ch/unread"), ("GET", "/asked"), ("GET", "/rooms/:ch/threads"), ("GET", "/threads/:root"), ("GET", "/observations/:id/content"), ("GET", "/observations/:id/cargo"), ("GET", "/presence"), ("GET", "/states"), ("GET", "/channels"), ("GET", "/fold"), ("POST", "/fold"), ("GET", "/keys"), ("POST", "/keys"),
+    ("GET", "/public/rooms"), ("GET", "/public/room/:room"), ("GET", "/tasks"), ("GET", "/cards"), ("GET", "/rooms/:ch/messages"), ("GET", "/rooms/:ch/view"), ("GET", "/rooms/mine"), ("GET", "/rooms/:ch/state"), ("GET", "/rooms/:ch/page"), ("GET", "/rooms/:ch/map"), ("GET", "/maps"), ("GET", "/rooms/:ch/unread"), ("GET", "/asked"), ("GET", "/rooms/:ch/threads"), ("GET", "/threads/:root"), ("GET", "/observations/:id/content"), ("GET", "/observations/:id/cargo"), ("GET", "/presence"), ("GET", "/states"), ("GET", "/channels"), ("GET", "/fold"), ("POST", "/fold"), ("GET", "/keys"), ("POST", "/keys"),
     ("GET", "/stream"), ("POST", "/admin/import"), ("GET", "/sync/log"), ("GET", "/sync/keys"), ("POST", "/sync/push"), ("GET", "/sync/status"), ("POST", "/admin/rooms"), ("GET", "/admin/rooms"), ("GET", "/metrics/routes"),
     ("POST", "/mcp"), ("GET", "/mcp"), ("DELETE", "/mcp"), ("POST", "/mcp/"), ("GET", "/mcp/"), ("DELETE", "/mcp/"),
     ("GET", "/.well-known/oauth-authorization-server"), ("GET", "/.well-known/oauth-protected-resource"), ("GET", "/.well-known/oauth-protected-resource/*path"),
@@ -313,6 +313,10 @@ struct SearchQ {
     channel: Option<String>,
     kind: Option<String>,
     ranker: Option<String>,
+    approved: Option<String>,
+    recency: Option<f64>,
+    rerank: Option<String>,
+    as_of: Option<String>,
     tag: Option<String>,
     limit: Option<i64>,
     before: Option<i64>,
@@ -406,7 +410,7 @@ async fn search_any(
             let sem = app.semantic.clone();
             return Ok(Json(blocking(&app, move |s| crate::roomread::search_with(s, &sq, sem.as_deref())).await?));
         }
-        let body = json!({"query": query, "channel": q.channel, "kind": q.kind, "limit": q.limit, "ranker": q.ranker, "include_archived": q.include_archived});
+        let body = json!({"query": query, "channel": q.channel, "kind": q.kind, "limit": q.limit, "ranker": q.ranker, "approved": q.approved, "recency": q.recency, "rerank": q.rerank, "as_of": q.as_of, "include_archived": q.include_archived});
         return search(State(app), headers, axum::body::Bytes::from(body.to_string())).await;
     }
     if let Some(terms) = q.about {
@@ -533,6 +537,92 @@ async fn cortex_nodes(State(app): State<App>, headers: HeaderMap, Query(q): Quer
         oracle_mcp::cortex_keep_top(&mut v, n);
     }
     Ok(Json(v))
+}
+
+/// `GET /minds` — every mind ranked by how much it has said (minds::list).
+async fn minds_list(State(app): State<App>, headers: HeaderMap) -> Api<Json<serde_json::Value>> {
+    principal(&app, &headers, Scope::Read).await?;
+    Ok(Json(blocking(&app, crate::minds::list).await?))
+}
+
+#[derive(Deserialize)]
+struct MindQ {
+    before: Option<i64>,
+    limit: Option<usize>,
+}
+
+/// `GET /minds/:handle?before=&limit=` — one mind's statements, newest first, under the reader's visibility (minds::statements).
+async fn mind_statements(State(app): State<App>, headers: HeaderMap, Path(handle): Path<String>, Query(q): Query<MindQ>) -> Api<Json<serde_json::Value>> {
+    let who = principal(&app, &headers, Scope::Read).await?;
+    Ok(Json(blocking(&app, move |s| crate::minds::statements(s, &who.handle, &handle, q.before, q.limit)).await?))
+}
+
+#[derive(Deserialize)]
+struct AnswerableQ {
+    q: String,
+    room: Option<String>,
+}
+
+/// `GET /answerable?q=&room=` — whether Oracle can answer a question before anyone recalls it (answerable::check): yes, partial
+/// or no, the words on record and not, and what the owner approved. The caller's hidden rooms are left out of every count.
+async fn answerable(State(app): State<App>, headers: HeaderMap, Query(q): Query<AnswerableQ>) -> Api<Json<serde_json::Value>> {
+    let who = principal(&app, &headers, Scope::Read).await?;
+    Ok(Json(blocking(&app, move |s| {
+        let hidden = crate::privaterooms::hidden_for(&s.private_rooms_table()?, &who.handle);
+        crate::answerable::check(s, &q.q, q.room.as_deref(), &hidden)
+    }).await?))
+}
+
+#[derive(Deserialize)]
+struct ExtractBody {
+    text: String,
+}
+
+/// `POST /extract` — the decisions, lessons, preferences and commitments in a session's text (extract.rs, docs/CAPTURE.md).
+/// It stores nothing: the seat signs what it keeps. A seat that can write may ask; 503 when no model is configured.
+async fn extract(State(app): State<App>, headers: HeaderMap, body: axum::body::Bytes) -> Api<Json<serde_json::Value>> {
+    principal(&app, &headers, Scope::Write).await?;
+    let b: ExtractBody = parse(&body)?;
+    let ex = crate::extract::configured()
+        .ok_or_else(|| ApiError(StoreError::Unavailable("no extraction model is configured here (ORACLE_EXTRACT_URL)".into())))?;
+    let out = tokio::task::spawn_blocking(move || ex.extract(&b.text))
+        .await
+        .map_err(|e| ApiError(StoreError::Internal(e.to_string())))?
+        .map_err(|e| ApiError(StoreError::Unavailable(e)))?;
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct ReflectBody {
+    memories: Vec<serde_json::Value>,
+    #[serde(default)]
+    previous: Vec<serde_json::Value>,
+}
+
+/// `POST /reflect` — a mind's recent memories and current observations in, refined observations out (extract.rs reflect,
+/// docs/REFLECT.md). Stores nothing: the mind signs what it keeps (`ox reflect`). Write scope; 503 with no model.
+async fn reflect(State(app): State<App>, headers: HeaderMap, body: axum::body::Bytes) -> Api<Json<serde_json::Value>> {
+    principal(&app, &headers, Scope::Write).await?;
+    let b: ReflectBody = parse(&body)?;
+    let ex = crate::extract::configured()
+        .ok_or_else(|| ApiError(StoreError::Unavailable("no model is configured here (ORACLE_EXTRACT_URL)".into())))?;
+    let out = tokio::task::spawn_blocking(move || ex.reflect(&b.memories, &b.previous))
+        .await
+        .map_err(|e| ApiError(StoreError::Internal(e.to_string())))?
+        .map_err(|e| ApiError(StoreError::Unavailable(e)))?;
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct LawQ {
+    top: Option<usize>,
+}
+
+/// `GET /cortex/law?top=` — what Blaze approved as Rule, Profile or Preference, one line each, most linked first (cortex::law);
+/// every seat's brief reads it.
+async fn cortex_law(State(app): State<App>, headers: HeaderMap, Query(q): Query<LawQ>) -> Api<Json<serde_json::Value>> {
+    principal(&app, &headers, Scope::Read).await?;
+    Ok(Json(blocking(&app, move |s| crate::cortex::law(s, q.top)).await?))
 }
 
 /// `GET /cortex/entity/:name` — a sourced, deterministic primer under the caller's visibility.
@@ -927,6 +1017,32 @@ async fn terms_file() -> Option<serde_json::Value> {
     let path = std::env::var("ORACLE_TERMS_FILE").unwrap_or_else(|_| "/var/lib/oracle-terms/terms.json".into());
     let raw = tokio::task::spawn_blocking(move || std::fs::read_to_string(path)).await.ok()?.ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// `GET /rooms/{ch}/page` — the room's page, its live state (room_page.rs, docs/ROOM-PAGE.md): composed on every read from the
+/// room's signed records. Authorized like room-view/1: a room the caller may not read answers 404, exactly like one that does not
+/// exist. Never cached, so a revocation holds on the next read.
+async fn room_page(State(app): State<App>, headers: HeaderMap, Path(ch): Path<String>) -> Response {
+    let who = match principal(&app, &headers, Scope::Read).await { Ok(w) => w, Err(e) => return e.into_response() };
+    let public = app.public_rooms.clone();
+    let through = app.semantic.as_ref().and_then(|s| s.indexed_through());
+    let now = now_ms();
+    let out = blocking(&app, move |s| {
+        if crate::roomview::access(s, &public, &who, &ch)?.is_none() {
+            return Ok(None);
+        }
+        crate::room_page::compose(s, &ch, now, through).map(Some)
+    })
+    .await;
+    match out {
+        Ok(Some(v)) => {
+            let mut res = Json(v).into_response();
+            res.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("private, no-store"));
+            res
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "no such room"}))).into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 /// `GET /rooms/{ch}/map` — the room's map (docs/ROOM-MAP.md): the written map from its State beside what the index computes, and the line the brief prints.
@@ -1328,6 +1444,12 @@ pub fn router(app: App) -> Router {
         .route("/cortex", get(cortex_nodes))
         .route("/cortex/node/:nid", get(cortex_node))
         .route("/cortex/entity/:name", get(entity_brief))
+        .route("/cortex/law", get(cortex_law))
+        .route("/minds", get(minds_list))
+        .route("/minds/:handle", get(mind_statements))
+        .route("/answerable", get(answerable))
+        .route("/extract", post(extract))
+        .route("/reflect", post(reflect))
         .route("/cortex/marks", get(cortex_marks))
         .route("/cortex/cases", get(cortex_cases))
         .route("/cortex/case/:n", get(cortex_case))
@@ -1351,6 +1473,7 @@ pub fn router(app: App) -> Router {
         .route("/rooms/:ch/view", get(crate::roomview::view))
         .route("/rooms/:ch/messages", get(room_messages))
         .route("/rooms/:ch/state", get(room_state))
+        .route("/rooms/:ch/page", get(room_page))
         .route("/rooms/:ch/map", get(room_map))
         .route("/maps", get(maps))
         .route("/rooms/:ch/threads", get(room_threads))
@@ -1455,7 +1578,10 @@ async fn whoami(State(app): State<App>, headers: HeaderMap) -> Api<Json<serde_js
         "server_ms": now_ms(), "local": oracle_proto::local_clock_env(now_ms()),
         // What this server understands, so a client never sends what it would refuse.
         // cortex_count: GET /cortex?count=1 (1 Nov 2026), so a brief never fetches the whole node list from an older server.
-        "features": ["authored_ms", "prev", "cortex_count"],
+        // cortex_law: GET /cortex/law (3 Nov 2026), the LAW lines of every brief.
+        // extract: POST /extract (4 Nov 2026), present only when a model is configured (ORACLE_EXTRACT_URL).
+        "features": (["authored_ms", "prev", "cortex_count", "cortex_law", "minds", "answerable"].into_iter()
+            .chain(crate::extract::configured().into_iter().flat_map(|_| ["extract", "reflect"])).collect::<Vec<_>>()),
     })))
 }
 
@@ -2466,8 +2592,16 @@ struct SearchBody {
     limit: Option<i64>,
     /// Ranking experiment (store::Ranker): rrf (default), and-first, and3. For measured A/B with `ox eval --param`.
     ranker: Option<String>,
+    /// How approved records place (store::ApprovedOrder): lead (default), boost, off. For measured A/B with `--param`.
+    approved: Option<String>,
+    /// How much a recent record gains over an old one, 0 (default) to 1 (store::Tuning).
+    recency: Option<f64>,
     /// The archived rooms and expired records too (docs/ARCHIVE.md); off, the answer says what was not considered.
     include_archived: Option<bool>,
+    /// `off` keeps the fused order instead of the cross-encoder's (store::Tuning::rerank), for measured A/B.
+    rerank: Option<String>,
+    /// As of a moment (oracle_proto::parse_when): what was on record then, and what held then (docs/SEARCH.md "Valid in time").
+    as_of: Option<String>,
 }
 
 async fn search(
@@ -2490,6 +2624,7 @@ async fn search(
                 let v = s.strength(&b.query, b.channel.as_deref(), day_ago, sem.as_deref());
                 (v, t.elapsed().as_millis() as u64)
             });
+            crate::store::SEARCH_TUNING.with(|t| *t.borrow_mut() = crate::store::Tuning::parse(b.approved.as_deref(), b.recency).with_rerank(b.rerank.as_deref()).with_as_of(b.as_of.as_deref().and_then(oracle_proto::parse_when)));
             let found = s.search_in(
                 &b.query,
                 b.channel.as_deref(),

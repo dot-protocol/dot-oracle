@@ -109,8 +109,7 @@ pub struct AskRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by_ms: Option<i64>,
     pub overdue: bool,
-    /// Past its time-to-live with no deadline and still unanswered: listed (a clock does not answer an ask),
-    /// marked so a reader can show it as old.
+    /// Past its time-to-live with no deadline and still unanswered: set aside with the overdue ones (`aside`).
     pub aged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answered_by: Option<String>,
@@ -148,6 +147,11 @@ pub struct Asks {
     pub stuck: Vec<AskRow>,
     /// Asks to me I marked later, whose time has not come: they come back to waiting_on_me by themselves.
     pub later: Vec<AskRow>,
+    /// Asks to me or by me whose time has passed (its `by:` expiry, or the fuse of an undeclared question), still
+    /// unanswered: set aside, readable here, never on an open list (Blaze, 4 Nov 2026: "anything that is being asked
+    /// … is due right now … only a project or outcome might have an expiry. After that, it should not stay clogged in
+    /// the open things … kept aside or archived"; Rocky's record).
+    pub aside: Vec<AskRow>,
     /// True when a candidate read hit its cap: older asks may be missing.
     pub capped: bool,
     /// Each list's full length before it was cut to LIST_CAP rows, so a reader can say "200 of 312".
@@ -164,6 +168,8 @@ pub struct Totals {
     pub im_waiting_on_answered: usize,
     /// When the oldest ask waiting on me was written (epoch ms), before the cut; None when nothing waits on me.
     pub oldest_waiting_ms: Option<i64>,
+    /// Asks set aside because their time passed (`aside`), before the cut.
+    pub aside: usize,
 }
 
 /// `options` from a cargo string: the labels, when it carries a list of strings.
@@ -562,7 +568,7 @@ pub fn counts(asks: &serde_json::Value) -> serde_json::Value {
         "schema": "asks-count/1", "seat": asks["seat"], "canonical": asks["canonical"],
         "waiting_on_me": n("waiting_on_me"), "oldest_ms": t["oldest_waiting_ms"],
         "im_waiting_on": n("im_waiting_on"), "im_waiting_on_answered": n("im_waiting_on_answered"),
-        "acked": len("acked"), "stuck": len("stuck"), "later": len("later"), "done_today": n("done_today"),
+        "acked": len("acked"), "stuck": len("stuck"), "later": len("later"), "aside": n("aside"), "done_today": n("done_today"),
         "capped": asks["capped"] == true,
     })
 }
@@ -920,10 +926,14 @@ fn asks_settled_from(s: &Store, seat: &str, room: Option<&str>, filter: StateFil
     // later: off my waiting list until its time, then back on it by itself (a time passing is not a new record, so the
     // asks cache's own age bounds how late it shows).
     let deferred = |r: &AskRow| my_mark(r) == Some("later") && r.later_until.get(&me).is_some_and(|u| *u > now_ms);
-    let mut later: Vec<AskRow> = rows.iter().filter(|r| to_me(r) && deferred(r)).cloned().collect();
+    // An ask is due the moment it is asked; its `by:` is when it expires, not when it is due. Past it (or past the fuse
+    // of an undeclared question) and still open, it is set aside: off every open list, kept readable (Blaze, 4 Nov 2026).
+    let expired = |r: &AskRow| r.overdue || r.aged;
+    let mut aside: Vec<AskRow> = rows.iter().filter(|r| expired(r) && ((to_me(r) && !deferred(r)) || (open(r) && wrote(r)))).cloned().collect();
+    let mut later: Vec<AskRow> = rows.iter().filter(|r| to_me(r) && deferred(r) && !expired(r)).cloned().collect();
     let mut waiting_on_me: Vec<AskRow> = rows
         .iter()
-        .filter(|r| to_me(r) && !matches!(my_mark(r), Some("ack" | "go" | "stuck")) && !deferred(r))
+        .filter(|r| to_me(r) && !matches!(my_mark(r), Some("ack" | "go" | "stuck")) && !deferred(r) && !expired(r))
         .cloned()
         .map(|mut r| {
             // Another addressee answered; this seat has not: open for this seat, with the other answer beside it.
@@ -934,27 +944,29 @@ fn asks_settled_from(s: &Store, seat: &str, room: Option<&str>, filter: StateFil
             r
         })
         .collect();
-    let mut im_waiting_on: Vec<AskRow> = rows.iter().filter(|r| open(r) && wrote(r)).cloned().collect();
+    let mut im_waiting_on: Vec<AskRow> = rows.iter().filter(|r| open(r) && wrote(r) && !expired(r)).cloned().collect();
     let mut done_today: Vec<AskRow> = rows.iter().filter(|r| r.settled_ms.is_some_and(|ms| ms >= today) && (wrote(r) || (mine(r) && !still_mine.contains(&r.id)))).cloned().collect();
-    // Overdue first, then the oldest; what was settled most recently first.
-    let by_age = |a: &AskRow, b: &AskRow| b.overdue.cmp(&a.overdue).then(a.created_ms.cmp(&b.created_ms));
+    // The oldest first (every open ask is due now, so the one waiting longest leads); what was settled most recently first.
+    let by_age = |a: &AskRow, b: &AskRow| a.created_ms.cmp(&b.created_ms);
     waiting_on_me.sort_by(by_age);
     im_waiting_on.sort_by(by_age);
     done_today.sort_by_key(|r| std::cmp::Reverse(r.settled_ms));
     acked.sort_by(by_age);
     stuck.sort_by(by_age);
     later.sort_by_key(|r| r.later_until.get(&me).copied().unwrap_or(i64::MAX));
+    aside.sort_by_key(|r| std::cmp::Reverse(r.created_ms));
     let mut totals = Totals {
         waiting_on_me: waiting_on_me.len(),
         im_waiting_on: im_waiting_on.len(),
         done_today: done_today.len(),
         im_waiting_on_answered: im_waiting_on.iter().filter(|r| r.state == "answered").count(),
         oldest_waiting_ms: waiting_on_me.iter().map(|r| r.created_ms).min(),
+        aside: aside.len(),
     };
     // A list over the cap keeps its NEWEST rows, in the order above (23 Oct: with 200 old asks open, `ox close` refused
     // a seat's own ask of five minutes ago, because the cut kept the 200 oldest and the closer reads this list; Emmy's
     // repro). done_today is newest first already.
-    for l in [&mut waiting_on_me, &mut im_waiting_on, &mut acked, &mut stuck, &mut later] {
+    for l in [&mut waiting_on_me, &mut im_waiting_on, &mut acked, &mut stuck, &mut later, &mut aside] {
         keep_newest(l, LIST_CAP);
     }
     done_today.truncate(LIST_CAP);
@@ -968,13 +980,15 @@ fn asks_settled_from(s: &Store, seat: &str, room: Option<&str>, filter: StateFil
         acked.clear();
         stuck.clear();
         later.clear();
+        aside.clear();
+        totals.aside = 0;
         totals.waiting_on_me = 0;
         totals.im_waiting_on = 0;
         totals.im_waiting_on_answered = 0;
         totals.oldest_waiting_ms = None;
     }
     ph.lap("lists");
-    Ok(Asks { seat: seat.to_owned(), canonical: (me != seat).then_some(me), waiting_on_me, im_waiting_on, done_today, acked, stuck, later, capped, totals })
+    Ok(Asks { seat: seat.to_owned(), canonical: (me != seat).then_some(me), waiting_on_me, im_waiting_on, done_today, acked, stuck, later, aside, capped, totals })
 }
 
 #[cfg(test)]

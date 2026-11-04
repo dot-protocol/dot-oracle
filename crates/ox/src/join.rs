@@ -4,6 +4,8 @@
 //! write token the server returns, so every ox command and `ox mcp` work as that seat. The key never leaves the machine.
 //! `connect` adds `ox mcp` to an agent here as an MCP server, through the agent's own `mcp add` where it has one, so
 //! the agent's writes are signed locally with the seat's key.
+//! It also writes the `oracle` skill (skills/oracle, Agent Skills format) where that agent reads skills, so the agent
+//! learns when to search, how to tell the owner and what to write back, not only which tools exist.
 
 use super::{write_private, Config, Ox};
 use anyhow::{anyhow, bail, Context, Result};
@@ -101,6 +103,7 @@ pub fn connect(home: &Path, default_home: &Path, agent: Agent, dry_run: bool) ->
     let env = |flag: &str| -> Vec<String> {
         launch.home.iter().flat_map(|h| [flag.to_string(), format!("OX_HOME={h}")]).collect()
     };
+    install_skill(&user_file(skill_dir(agent))?, home, dry_run)?;
     match agent {
         Agent::ClaudeCode => {
             let mut a = vec!["mcp", "add", "--scope", "user"].into_iter().map(String::from).collect::<Vec<_>>();
@@ -128,6 +131,60 @@ pub fn connect(home: &Path, default_home: &Path, agent: Agent, dry_run: bool) ->
         Agent::Hermes => edit(&user_file(".hermes/config.yaml")?, dry_run, |text| hermes_add(text, &launch.ox, launch.home.as_deref()), "start a new `hermes chat`, or run /reload-mcp"),
         Agent::Cursor => edit(&user_file(".cursor/mcp.json")?, dry_run, |text| cursor_add(text, &launch.ox, launch.home.as_deref()), "restart Cursor"),
     }
+}
+
+/// The `oracle` skill, built into ox so `connect` installs the procedure that matches this binary. Paths are
+/// relative to the skill's folder; the source is skills/oracle at the repository root.
+pub const SKILL: [(&str, &str); 7] = [
+    ("SKILL.md", include_str!("../../../skills/oracle/SKILL.md")),
+    ("references/search.md", include_str!("../../../skills/oracle/references/search.md")),
+    ("references/messaging.md", include_str!("../../../skills/oracle/references/messaging.md")),
+    ("references/writing.md", include_str!("../../../skills/oracle/references/writing.md")),
+    ("references/schema.md", include_str!("../../../skills/oracle/references/schema.md")),
+    ("references/evaluate.md", include_str!("../../../skills/oracle/references/evaluate.md")),
+    ("evals/evals.json", include_str!("../../../skills/oracle/evals/evals.json")),
+];
+
+/// Where each agent reads a user's skills, relative to the home directory. Codex reads the shared `.agents/skills`.
+fn skill_dir(agent: Agent) -> &'static str {
+    match agent {
+        Agent::ClaudeCode => ".claude/skills",
+        Agent::Codex => ".agents/skills",
+        Agent::Gemini => ".gemini/skills",
+        Agent::Openclaw => ".openclaw/skills",
+        Agent::Hermes => ".hermes/skills",
+        Agent::Cursor => ".cursor/skills",
+    }
+}
+
+/// Write the skill to `root/oracle`. Unchanged files are left alone. A copy that differs (an older ox's, or one the
+/// person edited) is moved whole to `home/skill-backup/<unix time>` first: never beside the skill, where a second
+/// folder whose SKILL.md is also named `oracle` would collide with it.
+pub fn install_skill(root: &Path, home: &Path, dry_run: bool) -> Result<()> {
+    let dir = root.join("oracle");
+    let same = SKILL.iter().all(|(rel, text)| std::fs::read_to_string(dir.join(rel)).is_ok_and(|t| t == *text));
+    if same {
+        println!("already     {} holds this skill", dir.display());
+        return Ok(());
+    }
+    if dry_run {
+        println!("would write {} ({} files)", dir.display(), SKILL.len());
+        return Ok(());
+    }
+    if dir.exists() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let backup = home.join("skill-backup").join(stamp.to_string());
+        std::fs::create_dir_all(&backup)?;
+        std::fs::rename(&dir, backup.join("oracle")).with_context(|| format!("cannot move the old {} aside", dir.display()))?;
+        println!("kept        the previous skill at {}", backup.join("oracle").display());
+    }
+    for (rel, text) in SKILL {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a skill file has a folder"))?;
+        std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    println!("skill       {} (the oracle skill: when to search, how to tell the owner, what to write back)", dir.display());
+    Ok(())
 }
 
 fn user_file(rel: &str) -> Result<PathBuf> {
@@ -313,6 +370,45 @@ mod tests {
         assert!(e.contains("does not take public seats"), "{e}");
         assert!(!home.join("seat.key").exists() && !home.join("config.json").exists());
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_built_in_skill_meets_the_agent_skills_format() {
+        let (_, md) = SKILL[0];
+        let front = md.strip_prefix("---\n").and_then(|r| r.split_once("\n---\n")).map(|(f, _)| f).expect("frontmatter");
+        let field = |k: &str| front.lines().find_map(|l| l.strip_prefix(&format!("{k}: "))).unwrap_or("");
+        assert_eq!(field("name"), "oracle", "the name matches the folder");
+        let d = field("description");
+        assert!(!d.is_empty() && d.chars().count() <= 1024, "a description of 1 to 1024 characters: {}", d.len());
+        assert!(md.lines().count() < 500, "SKILL.md stays under 500 lines");
+        for (rel, _) in &SKILL[1..6] {
+            assert!(md.contains(rel), "SKILL.md links {rel} directly, one level deep");
+        }
+        serde_json::from_str::<Value>(SKILL[6].1).expect("evals.json is JSON");
+    }
+
+    #[test]
+    fn the_skill_installs_once_keeps_an_edited_copy_and_dry_runs_write_nothing() {
+        let home = tmp("skill-home");
+        let root = tmp("skill-root");
+        install_skill(&root, &home, true).unwrap();
+        assert!(!root.join("oracle").exists(), "a dry run writes nothing");
+        install_skill(&root, &home, false).unwrap();
+        for (rel, text) in SKILL {
+            assert_eq!(std::fs::read_to_string(root.join("oracle").join(rel)).unwrap(), text);
+        }
+        assert!(!home.join("skill-backup").exists(), "a first install has nothing to keep");
+        install_skill(&root, &home, false).unwrap();
+        assert!(!home.join("skill-backup").exists(), "an unchanged skill is left alone");
+        std::fs::write(root.join("oracle/SKILL.md"), "edited by hand").unwrap();
+        install_skill(&root, &home, false).unwrap();
+        let kept: Vec<_> = std::fs::read_dir(home.join("skill-backup")).unwrap().flatten().collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path().join("oracle/SKILL.md")).unwrap(), "edited by hand");
+        assert_eq!(std::fs::read_to_string(root.join("oracle/SKILL.md")).unwrap(), SKILL[0].1);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "nothing else named like the skill sits beside it");
+        let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

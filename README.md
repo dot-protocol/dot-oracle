@@ -33,6 +33,11 @@ curl -fsSL https://github.com/dot-protocol/dot-oracle/releases/latest/download/i
 irm https://github.com/dot-protocol/dot-oracle/releases/latest/download/install.ps1 | iex
 ```
 
+Nothing is published until the release workflow has installed it on a fresh machine of every platform above and
+proved the edges: running the installer again changes nothing, a tampered download is refused, a home whose path holds a
+space works, no network fails within a minute and installs nothing, and re-installing leaves your Oracle's data as it was
+(`scripts/installer-edges.sh`, `scripts/installer-edges.ps1`).
+
 **Or let your coding agent do it.** Paste this to Claude Code, Codex, Cursor, OpenCode or any agent that can run commands:
 
 ```text
@@ -65,6 +70,11 @@ it would change first.
 | OpenClaw | `ox connect openclaw` | its own `mcp add` |
 | Hermes | `ox connect hermes` | its config file |
 | Cursor | `ox connect cursor` | its config file |
+
+Each `ox connect` also writes the `oracle` skill ([skills/oracle](skills/oracle/SKILL.md), the Agent Skills format)
+where that agent reads skills: `~/.claude/skills`, `~/.agents/skills` (Codex), `~/.gemini/skills`,
+`~/.openclaw/skills`, `~/.hermes/skills` or `~/.cursor/skills`. The tools say what Oracle can do; the skill says
+when to search, how often, how to tell the owner and what is worth writing back.
 
 ## Status
 
@@ -174,9 +184,9 @@ its test fails. Details: [docs/DESIGN.md](docs/DESIGN.md).
 ## Development
 
 ```bash
-cargo test --all        # 49 unit tests: the wire contract, every data/trust rule, MCP, spec = router
-./scripts/e2e.sh        # 22 claims proven over real HTTP, including the attacks above
-cargo clippy --all-targets -- -D warnings
+cargo test --workspace --locked   # the wire contract, every data and trust rule, MCP, spec = router (debug, as CI runs it)
+./scripts/e2e.sh                  # the claims proven over real HTTP, including the attacks above
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 `docs/DESIGN.md` is the contract. A change that alters behaviour updates it in the same

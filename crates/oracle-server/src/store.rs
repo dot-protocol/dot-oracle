@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE INDEX IF NOT EXISTS obs_channel_seq ON observations(channel, seq, author, news);
 CREATE INDEX IF NOT EXISTS obs_created     ON observations(created_ms, news);
 CREATE INDEX IF NOT EXISTS obs_author_seq  ON observations(author, seq);
+-- What each mind signed (GET /minds): imports (envelope 1: claude.ai exports as 'assistant'/'human', the graph Oracle) are not a mind's statements.
+CREATE INDEX IF NOT EXISTS obs_native_author ON observations(author, seq) WHERE envelope=2;
 -- A record's code (the last twelve hex of its id, the first twelve of sha256 of its signature) names it alone (Blaze, 31 Oct 2026).
 CREATE INDEX IF NOT EXISTS obs_code        ON observations(substr(id, -12));
 
@@ -374,6 +376,13 @@ pub struct SearchHit {
     /// A Blaze-approved cortex observation (verified owner or attested, never a cargo field).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub approved: bool,
+    /// The `valid-until:` the record was written with (docs/SEARCH.md "Valid in time"), as ISO-8601 UTC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+    /// When it stopped holding, as of the search's moment: its successor was written, or its valid-until passed (the earlier).
+    /// Absent while it holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid_since: Option<String>,
 }
 
 /// Where a hit stands in its thread, from its edges: how many replied, whether a `closes:` answered it, what it answers.
@@ -507,7 +516,8 @@ impl SearchHit {
         let title = title_of(&obs, class, &clean);
         let snippet = snippet_of(&obs, &clean, &at);
         let thread = thread_of(&edges);
-        SearchHit { obs, score, at, same_as, like: vec![], superseded_by, edges, brain: None, cited_by: None, class, title, snippet, thread, author_kind, synthetic, words: None, approved: false }
+        let valid_until = valid_until_of(&obs.tags).map(oracle_proto::iso_ms);
+        SearchHit { obs, score, at, same_as, like: vec![], superseded_by, edges, brain: None, cited_by: None, class, title, snippet, thread, author_kind, synthetic, words: None, approved: false, valid_until, invalid_since: None }
     }
 }
 
@@ -619,13 +629,38 @@ pub const ATTESTATION_TAGS: [&str; 2] = ["signed:ok", "cargo-signed:ok"];
 pub const SUPERSEDED_WEIGHT: f64 = 0.5;
 
 /// The newest record that supersedes `seq`, if any.
-fn successor_of(c: &Connection, seq: i64) -> rusqlite::Result<Option<String>> {
+/// The newest record that says it replaces `seq`, and when it was written; with `as_of`, only one written by then (a fact
+/// replaced later still held on that day).
+fn successor_of(c: &Connection, seq: i64, as_of: Option<i64>) -> rusqlite::Result<Option<(String, i64)>> {
     c.prepare_cached(
-        "SELECT o2.id FROM observations o JOIN tags t ON t.name = 'supersedes:' || o.id \
-         JOIN observations o2 ON o2.seq = t.obs_seq WHERE o.seq = ?1 ORDER BY o2.seq DESC LIMIT 1",
+        "SELECT o2.id, o2.created_ms FROM observations o JOIN tags t ON t.name = 'supersedes:' || o.id \
+         JOIN observations o2 ON o2.seq = t.obs_seq WHERE o.seq = ?1 AND (?2 IS NULL OR o2.created_ms <= ?2) ORDER BY o2.seq DESC LIMIT 1",
     )?
-    .query_row([seq], |r| r.get(0))
+    .query_row(params![seq, as_of], |r| Ok((r.get(0)?, r.get(1)?)))
     .optional()
+}
+
+/// The `valid-until:<moment>` a record was written with ([`oracle_proto::parse_when`]: unix ms, or a date through its end).
+pub fn valid_until_of(tags: &[String]) -> Option<i64> {
+    tags.iter().find_map(|t| t.strip_prefix("valid-until:")).and_then(oracle_proto::parse_when)
+}
+
+/// Facts whose validity ended by `clock` (their `valid-until` is earlier) rank as a superseded record does: the score times
+/// SUPERSEDED_WEIGHT, the list re-sorted. Returns each one's end.
+fn demote_expired(c: &Connection, ranked: &mut [(i64, f64)], clock: i64) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
+    let mut st = c.prepare_cached("SELECT name FROM tags WHERE obs_seq=?1 AND name LIKE 'valid-until:%' LIMIT 1")?;
+    let mut ended = std::collections::HashMap::new();
+    for (seq, score) in ranked.iter_mut() {
+        let tag: Option<String> = st.query_row([*seq], |r| r.get(0)).optional()?;
+        if let Some(until) = tag.as_deref().and_then(|t| t.strip_prefix("valid-until:")).and_then(oracle_proto::parse_when).filter(|u| *u < clock) {
+            *score *= SUPERSEDED_WEIGHT;
+            ended.insert(*seq, until);
+        }
+    }
+    if !ended.is_empty() {
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    Ok(ended)
 }
 
 /// Superseded records rank lower: their scores are multiplied by SUPERSEDED_WEIGHT and the list re-sorted, ties in
@@ -790,7 +825,7 @@ const APPROVED_FIRST: usize = 5;
 /// to the front (at most [`APPROVED_FIRST`], in their order); one that does not, and was not named by the graph for a
 /// query of names alone (`named`), goes below the last record that does. Everything else keeps its order. Returns, for
 /// every ranked record read, how many content words it holds, and how many approved observations moved.
-fn approved_first(c: &Connection, ranked: &mut Vec<(i64, f64)>, words: &[String], approved: &std::collections::BTreeSet<String>, named: &[i64]) -> rusqlite::Result<(std::collections::HashMap<i64, usize>, usize)> {
+fn approved_first(c: &Connection, ranked: &mut Vec<(i64, f64)>, words: &[String], approved: &std::collections::BTreeSet<String>, named: &[i64], order: ApprovedOrder) -> rusqlite::Result<(std::collections::HashMap<i64, usize>, usize)> {
     let window: Vec<i64> = ranked.iter().take(COPY_WINDOW).filter(|(_, s)| *s < ALIAS_SCORE).map(|(seq, _)| *seq).collect();
     let held = words_held(c, &window, words)?;
     if words.is_empty() || window.is_empty() {
@@ -807,9 +842,12 @@ fn approved_first(c: &Connection, ranked: &mut Vec<(i64, f64)>, words: &[String]
         }
     }
     let about = |seq: &i64| held.get(seq).copied().unwrap_or(0) >= need || named.contains(seq);
-    let lead: Vec<i64> = window.iter().copied().filter(|seq| blessed.contains(seq) && about(seq)).take(APPROVED_FIRST).collect();
+    let lead: Vec<i64> = match order {
+        ApprovedOrder::Lead => window.iter().copied().filter(|seq| blessed.contains(seq) && about(seq)).take(APPROVED_FIRST).collect(),
+        ApprovedOrder::Boost | ApprovedOrder::Off => Vec::new(),
+    };
     let stray: Vec<i64> = window.iter().copied().filter(|seq| blessed.contains(seq) && !about(seq)).collect();
-    if lead.is_empty() && stray.is_empty() {
+    if lead.is_empty() && stray.is_empty() && order != ApprovedOrder::Boost {
         return Ok((held, 0));
     }
     let score_of: std::collections::HashMap<i64, f64> = ranked.iter().copied().collect();
@@ -818,7 +856,26 @@ fn approved_first(c: &Connection, ranked: &mut Vec<(i64, f64)>, words: &[String]
     // The strays go below the last record (in the window) that is about the query, in their own order.
     let last_about = rest.iter().take(COPY_WINDOW).rposition(|(seq, _)| about(seq)).map_or(0, |p| p + 1);
     let tail = rest.split_off(last_about.min(rest.len()));
-    let moved = lead.len();
+    let mut moved = lead.len();
+    if order == ApprovedOrder::Boost {
+        // Each approved record about the query rises at most APPROVED_BOOST places, the best-ranked first.
+        let mut i = 0;
+        while i < rest.len() {
+            let seq = rest[i].0;
+            if blessed.contains(&seq) && about(&seq) {
+                let to = i.saturating_sub(APPROVED_BOOST);
+                if to < i {
+                    let x = rest.remove(i);
+                    rest.insert(to, x);
+                    moved += 1;
+                }
+            }
+            i += 1;
+        }
+    }
+    if order == ApprovedOrder::Off {
+        moved = stray.len();
+    }
     *ranked = alias
         .into_iter()
         .chain(lead.iter().map(|seq| (*seq, score_of[seq])))
@@ -870,10 +927,10 @@ fn spread_rooms(c: &Connection, ranked: &mut Vec<(i64, f64)>, limit: i64) -> rus
     Ok(())
 }
 
-fn demote_superseded(c: &Connection, ranked: &mut [(i64, f64)]) -> rusqlite::Result<std::collections::HashMap<i64, String>> {
+fn demote_superseded(c: &Connection, ranked: &mut [(i64, f64)], as_of: Option<i64>) -> rusqlite::Result<std::collections::HashMap<i64, (String, i64)>> {
     let mut by = std::collections::HashMap::new();
     for (seq, score) in ranked.iter_mut() {
-        if let Some(next) = successor_of(c, *seq)? {
+        if let Some(next) = successor_of(c, *seq, as_of)? {
             *score *= SUPERSEDED_WEIGHT;
             by.insert(*seq, next);
         }
@@ -990,6 +1047,8 @@ pub struct Store {
     /// Public seats (publicseats.rs): the rooms they may write in and the limits they pass. Read from the environment
     /// when the store opens; tests set it with [`Store::set_public_config`].
     public: std::sync::RwLock<PublicConfig>,
+    /// The handles a query may name as a mind ([`named_minds`]), read from the signed authors and kept ten minutes.
+    minds: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
 }
 
 /// Which rooms take public seats' writes, and the limits those writes pass (publicseats.rs).
@@ -1456,7 +1515,7 @@ impl Store {
                 c.prepare(sql)?;
             }
         }
-        Ok(Store { pool, cites: std::sync::Mutex::new(None), public: std::sync::RwLock::new(PublicConfig::from_env()) })
+        Ok(Store { pool, cites: std::sync::Mutex::new(None), minds: std::sync::Mutex::new(None), public: std::sync::RwLock::new(PublicConfig::from_env()) })
     }
 
     /// A room's State below `as_of_seq` (an exclusive cursor: only rows with seq < as_of_seq; `None` is now, and the answer says which seq that was), from the same fold
@@ -2179,7 +2238,7 @@ impl Store {
             let c = pool.get()?;
             refresh_room_archive(&c)?;
         }
-        Ok(Store { pool, cites: std::sync::Mutex::new(None), public: std::sync::RwLock::new(PublicConfig::from_env()) })
+        Ok(Store { pool, cites: std::sync::Mutex::new(None), minds: std::sync::Mutex::new(None), public: std::sync::RwLock::new(PublicConfig::from_env()) })
     }
 
     /// A private in-memory database (one connection, so every call sees the same data).
@@ -2205,7 +2264,7 @@ impl Store {
             c.execute_batch(crate::files::SCHEMA)?;
             c.execute_batch(crate::publicseats::SCHEMA)?;
         }
-        Ok(Store { pool, cites: std::sync::Mutex::new(None), public: std::sync::RwLock::new(PublicConfig::from_env()) })
+        Ok(Store { pool, cites: std::sync::Mutex::new(None), minds: std::sync::Mutex::new(None), public: std::sync::RwLock::new(PublicConfig::from_env()) })
     }
 
     pub(crate) fn conn(&self) -> Result<r2d2::PooledConnection<SqliteConnectionManager>> {
@@ -3319,6 +3378,29 @@ impl Store {
 
 impl Store {
 
+    /// Every author with how many records they signed (envelope 2), their newest seq and when it was written (`GET /minds`): the
+    /// counts are an index-only walk of the partial index obs_native_author (0.06 s over 500k records on core, 3 Nov 2026), the times one primary-key read each.
+    pub fn author_counts(&self) -> Result<Vec<(String, i64, i64, i64)>> {
+        let c = self.conn()?;
+        let mut st = c.prepare_cached("SELECT author, count(*), max(seq) FROM observations WHERE envelope=2 GROUP BY author")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut at = c.prepare_cached("SELECT created_ms FROM observations WHERE seq=?1")?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (author, n, seq) in rows {
+            let ms: i64 = at.query_row(params![seq], |r| r.get(0))?;
+            out.push((author, n, seq, ms));
+        }
+        Ok(out)
+    }
+
+    /// One author's records, newest first, keyset-paginated on `seq` (`GET /minds/:handle`): an index walk of obs_author_seq.
+    pub fn authored(&self, author: &str, before_seq: Option<i64>, limit: i64) -> Result<Vec<Observation>> {
+        let c = self.conn()?;
+        let (before, limit) = (before_seq.unwrap_or(i64::MAX), limit.clamp(1, 500));
+        Self::load(&c, "WHERE o.author=?1 AND o.seq<?2 ORDER BY o.seq DESC LIMIT ?3", &[&author, &before, &limit])
+    }
+
     /// Newest first, keyset-paginated on `seq`. Always an index walk.
     pub fn recent(
         &self,
@@ -4355,12 +4437,28 @@ impl Store {
             Ok(found)
         };
         let keyword = |expr: &str, n: i64| keyword_on(&c, expr, n);
+        // The minds the query names (Blaze, 3 Nov 2026, the 20 real moments: "can Rocky start a context compaction on his own"
+        // lost to February readings about context; Rocky's own "I can't trigger compaction myself" never reached the first 50):
+        // their own records, by the same words, are a third voice in the fusion. Oracle knows who signed every record.
+        let minds = named_minds(self, &c, query);
+        // On the search's own connection, after the parallel step: the mind arm takes no connection of its own.
+        let by_mind = |expr: &str, n: i64| -> Result<Vec<i64>> {
+            if minds.is_empty() { return Ok(vec![]); }
+            let sql = format!("SELECT f.rowid, bm25(obs_fts) AS r FROM obs_fts f JOIN {table} o ON o.seq=f.rowid \
+                 WHERE obs_fts MATCH ?1 AND (?2 IS NULL OR o.channel=?2) AND (?3 IS NULL OR o.kind=?3) \
+                 AND o.author IN (SELECT value FROM json_each(?5)) ORDER BY r LIMIT ?4");
+            let mut st = c.prepare_cached(&sql)?;
+            let found = st.query_map(params![expr, channel, kind, n, serde_json::json!(minds).to_string()], |r| r.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<i64>, _>>()?;
+            Ok(found)
+        };
         let mut engine = match (sem, crate::semantic::OFF_REASON.get()) {
             (None, Some(why)) => format!("keyword (meaning search off: {why})"),
             _ => String::from("keyword"),
         };
         let mut match_expr = fts_query(query, " OR ");
         let mut ranked: Vec<(i64, f64)> = Vec::new();
+        let mut engine_minds: Option<String> = None;
         if let Some(sem) = sem.filter(|s| s.windows_loaded() > 0) {
             // The meaning side (embed the query, scan the vectors) and the two keyword passes do not depend on each
             // other: run them at once (measured 25 Oct on a canary: ~0.35 s + ~0.25 s + ~0.25 s one after another).
@@ -4374,6 +4472,7 @@ impl Store {
                 let any = keyword(&match_expr, side);
                 (meaning.join().expect("meaning search thread"), any, every.join().expect("keyword thread"))
             });
+            let mind_words = by_mind(&match_expr, side);
             lap("embed+vector+keyword");
             match near {
                 Ok(near) => {
@@ -4392,8 +4491,12 @@ impl Store {
                     lap("meaning-filter");
                     let words: Vec<i64> = words?.into_iter().map(|h| h.0).collect();
                     let all_words: Vec<i64> = all_words?.into_iter().map(|h| h.0).collect();
+                    let mind_words = mind_words?;
+                    if !mind_words.is_empty() {
+                        engine_minds = Some(minds.join(", "));
+                    }
                     ranked = match ranker {
-                        Ranker::Rrf => crate::semantic::rrf(&[words, meaning], crate::semantic::RRF_K),
+                        Ranker::Rrf => crate::semantic::rrf(&[words, meaning, mind_words], crate::semantic::RRF_K),
                         // Every word first, then any word: the keyword side the docstring always promised.
                         Ranker::AndFirst => {
                             let mut kw = all_words.clone();
@@ -4422,7 +4525,7 @@ impl Store {
                     reweigh(&c, &mut ranked)?;
                     lap("reweigh");
                     ranked.truncate(pool as usize);
-                    engine = "hybrid".into();
+                    engine = match &engine_minds { Some(m) => format!("hybrid + their own words ({m})"), None => "hybrid".into() };
                 }
                 Err(e) => engine = format!("keyword (meaning search unavailable: {e})"),
             }
@@ -4460,7 +4563,28 @@ impl Store {
             ranked.truncate(pool as usize);
             engine = format!("id alias + {engine}");
         }
-        let superseded = demote_superseded(&c, &mut ranked)?;
+        let tuning = SEARCH_TUNING.with(|t| *t.borrow());
+        if tuning.recency > 0.0 {
+            reweigh_recent(&c, &mut ranked, tuning.recency, now_ms_pub())?;
+            engine = format!("{engine} + recent ({:.2})", tuning.recency);
+        }
+        // Valid in time (3 Nov 2026, the competitor map's temporal-facts row): as of a moment, what was written after it is not
+        // on record yet and a fact replaced later still held; a fact whose valid-until has passed ranks as a replaced one does.
+        let clock = tuning.as_of.unwrap_or_else(now_ms_pub);
+        if let Some(at) = tuning.as_of {
+            let mut st = c.prepare_cached("SELECT created_ms FROM observations WHERE seq=?1")?;
+            let mut keep = Vec::with_capacity(ranked.len());
+            for r in ranked.drain(..) {
+                if st.query_row([r.0], |x| x.get::<_, i64>(0)).optional()?.is_some_and(|ms| ms <= at) {
+                    keep.push(r);
+                }
+            }
+            ranked = keep;
+            engine = format!("{engine} + as of {}", oracle_proto::iso_ms(at));
+        }
+        let superseded = demote_superseded(&c, &mut ranked, tuning.as_of)?;
+        let expired = demote_expired(&c, &mut ranked, clock)?;
+        let invalid_since = |seq: &i64| superseded.get(seq).map(|(_, at)| *at).into_iter().chain(expired.get(seq).copied()).min().map(oracle_proto::iso_ms);
         // Tiers first, so the room cap orders first-hand records among themselves (with scaffolding counted in, two
         // mail answers in evals/judged-20261010-r2 canon-ox fell from 1 and 2 to 4 and 7 on the 26 Oct canary).
         let views = self.cortex_views(&c).ok();
@@ -4493,11 +4617,42 @@ impl Store {
         let words = content_words(query);
         let empty = std::collections::BTreeSet::new();
         let approved_set = views.as_ref().map_or(&empty, |v| &v.concepts.approved);
-        let (held, led) = approved_first(&c, &mut ranked, &words, approved_set, &named_lead)?;
+        let (held, led) = approved_first(&c, &mut ranked, &words, approved_set, &named_lead, tuning.approved)?;
         if led > 0 {
-            engine = format!("{engine} + approved about it first ({led})");
+            engine = format!("{engine} + {} ({led})", match tuning.approved {
+                ApprovedOrder::Lead => "approved about it first",
+                ApprovedOrder::Boost => "approved about it raised",
+                ApprovedOrder::Off => "approved strays lowered",
+            });
         }
         lap("approved-first");
+        // Last, the cross-encoder reads the query with each of the first RERANK_DEPTH candidates and orders them (Hindsight's
+        // order comes from the same model); an exact id stays first; a failure keeps the
+        // fused order and says so.
+        if let Some(sem) = sem.filter(|s| tuning.rerank && s.reranks()) {
+            let start = ranked.iter().take_while(|(_, s)| *s >= ALIAS_SCORE).count();
+            let end = (start + RERANK_DEPTH).min(ranked.len());
+            if end > start + 1 {
+                let mut texts = Vec::with_capacity(end - start);
+                let mut st = c.prepare_cached("SELECT content FROM observations WHERE seq=?1")?;
+                for (seq, _) in &ranked[start..end] {
+                    let content: String = st.query_row(params![seq], |r| r.get(0)).unwrap_or_default();
+                    texts.push(passage(&content, &words));
+                }
+                match sem.rerank(query, &texts) {
+                    Ok(scores) => {
+                        let mut slice: Vec<((i64, f64), f32)> = ranked[start..end].iter().copied().zip(scores).collect();
+                        slice.sort_by(|a, b| b.1.total_cmp(&a.1));
+                        for (i, (r, _)) in slice.into_iter().enumerate() {
+                            ranked[start + i] = r;
+                        }
+                        engine = format!("{engine} + reranked ({})", end - start);
+                    }
+                    Err(e) => engine = format!("{engine} (rerank unavailable: {e})"),
+                }
+            }
+            lap("rerank");
+        }
         let mut kinds: std::collections::HashMap<String, &'static str> = std::collections::HashMap::new();
         // Approved means verified as the owner's (owner or attested), read from the cortex views, never a cargo field.
         let verified = self.cortex_views(&c).ok().map(|v| v.concepts.clone());
@@ -4522,7 +4677,8 @@ impl Store {
                             let at = match_at(&c, seq, &match_expr)?;
                             let edges = edges_of(&c, &obs)?;
                             let author_kind = *kinds.entry(obs.author.clone()).or_insert_with(|| author_kind_on(&c, &obs.author));
-                            let mut hit = SearchHit::build(obs, hits[k].score, at, vec![], superseded.get(&seq).cloned(), edges, author_kind);
+                            let mut hit = SearchHit::build(obs, hits[k].score, at, vec![], superseded.get(&seq).map(|s| s.0.clone()), edges, author_kind);
+                            hit.invalid_since = invalid_since(&seq);
                             hit.brain = Some(brain);
                             hit.approved = true;
                             hit.words = held.get(&seq).filter(|_| !words.is_empty()).map(|n| [*n, words.len()]);
@@ -4553,7 +4709,8 @@ impl Store {
                 }
                 let at = match_at(&c, seq, &match_expr)?;
                 let edges = edges_of(&c, &obs)?;
-                let mut hit = SearchHit::build(obs, score, at, vec![], superseded.get(&seq).cloned(), edges, author_kind);
+                let mut hit = SearchHit::build(obs, score, at, vec![], superseded.get(&seq).map(|s| s.0.clone()), edges, author_kind);
+                hit.invalid_since = invalid_since(&seq);
                 hit.brain = brain_of(&c, &hit.obs)?;
                 hit.approved = verified.as_ref().is_some_and(|v| v.contains(&hit.obs.id));
                 hit.words = held.get(&seq).filter(|_| !words.is_empty()).map(|n| [*n, words.len()]);
@@ -4905,6 +5062,22 @@ mod plan_tests {
         assert_eq!(above.iter().map(|r| r.0).collect::<Vec<_>>(), vec![node, import]);
     }
 
+    /// The passage the reranker reads (3 Nov 2026): about sixty words from a little before the first query word, on
+    /// character boundaries; with no query word in it, the start.
+    #[test]
+    fn the_reranker_reads_about_sixty_words_from_the_first_query_word() {
+        let long = format!("{} the lattice bootstrap took ten seconds {}", "filler ".repeat(100), "tail ".repeat(100));
+        let p = passage(&long, &["lattice".into()]);
+        assert!(p.contains("the lattice bootstrap took ten seconds"), "{p}");
+        assert!(p.len() <= RERANK_CHARS && p.starts_with("filler"), "a little before the word: {p}");
+        assert!(passage("no match here at all", &["lattice".into()]).starts_with("no match"), "no word: the start");
+        let multi = format!("{}é lattice", "ü".repeat(50));
+        assert!(passage(&multi, &["lattice".into()]).ends_with("lattice"), "cut on character boundaries");
+        // Lowercasing changes the byte length of some letters (the Kelvin sign is three bytes, its lowercase k one): no panic.
+        let kelvin = format!("{} lattice", "\u{212A}".repeat(60));
+        assert!(passage(&kelvin, &["lattice".into()]).contains("lattice"));
+    }
+
     /// Approved first, of what is about the query (31 Oct 2026, "dot-lattice bootstrap OpenFHE" led with an approved
     /// reading about Hoshi): an approved reading holding three in five of the query's words goes to the front; one holding
     /// none goes below the records that hold them; a query of names alone keeps what the graph named. Negative control:
@@ -4930,19 +5103,190 @@ mod plan_tests {
         let approved: std::collections::BTreeSet<String> = ["OBS-stray", "OBS-blessed"].iter().map(|s| s.to_string()).collect();
         let fused = vec![(stray, 0.033), (answer, 0.032), (half, 0.031), (blessed, 0.020)];
         let mut ranked = fused.clone();
-        let (held, led) = approved_first(&c, &mut ranked, &words, &approved, &[]).unwrap();
+        let (held, led) = approved_first(&c, &mut ranked, &words, &approved, &[], ApprovedOrder::Lead).unwrap();
         assert_eq!((held[&answer], held[&half], held[&stray], held[&blessed]), (4, 2, 0, 4));
         assert_eq!(led, 1);
         assert_eq!(ranked.iter().map(|r| r.0).collect::<Vec<_>>(), vec![blessed, answer, stray, half], "approved and about it first; the stray below the answer");
         // A query of names alone: what the graph named is about it, words or not.
         let mut named = fused.clone();
-        approved_first(&c, &mut named, &words, &approved, &[stray]).unwrap();
+        approved_first(&c, &mut named, &words, &approved, &[stray], ApprovedOrder::Lead).unwrap();
         assert_eq!(named[0].0, stray);
         // Control: nothing approved, nothing moves.
         let mut none = fused.clone();
-        assert_eq!(approved_first(&c, &mut none, &words, &std::collections::BTreeSet::new(), &[]).unwrap().1, 0);
+        assert_eq!(approved_first(&c, &mut none, &words, &std::collections::BTreeSet::new(), &[], ApprovedOrder::Lead).unwrap().1, 0);
         assert_eq!(none, fused);
     }
+
+    /// Rank by relevance (Blaze, 3 Nov 2026): under Boost an approved reading about the query rises at most
+    /// APPROVED_BOOST places instead of taking the front; under Off it keeps its place; strays still go below.
+    /// Negative control: Lead, on the same list, still puts it first.
+    #[test]
+    fn approved_readings_rise_a_little_under_boost_and_not_at_all_under_off() {
+        let store = Store::memory().unwrap();
+        let c = store.conn().unwrap();
+        let row = |id: &str, content: &str| {
+            c.execute("INSERT INTO observations(id, channel, author, kind, content, cargo, tags_json, created_ms, ts_ms, nonce, client_op, pubkey, sig) \
+                       VALUES (?1, 'r', 'x', 'say', ?2, '{}', '[]', 1, 1, ?1, ?1, 'k', 's')", params![id, content]).unwrap();
+            let seq = c.last_insert_rowid();
+            c.execute("INSERT INTO obs_fts(rowid,content,tags,cargo) VALUES(?1,?2,'[]','{}')", params![seq, content]).unwrap();
+            seq
+        };
+        let words = content_words("bridge card blaze");
+        let fused: Vec<(i64, f64)> = (0..6).map(|i| (row(&format!("OBS-{i}"), "the bridge card for blaze"), 0.05 - i as f64 * 0.001)).collect();
+        let late = row("OBS-approved", "the bridge card blaze reads");
+        let mut list = fused.clone();
+        list.push((late, 0.01));
+        let approved: std::collections::BTreeSet<String> = ["OBS-approved".to_string()].into();
+        let place = |order| { let mut r = list.clone(); approved_first(&c, &mut r, &words, &approved, &[], order).unwrap(); r.iter().position(|x| x.0 == late).unwrap() };
+        assert_eq!(place(ApprovedOrder::Lead), 0, "control: lead puts it first");
+        assert_eq!(place(ApprovedOrder::Boost), 6 - APPROVED_BOOST, "boost: three places up, no more");
+        assert_eq!(place(ApprovedOrder::Off), 6, "off: relevance keeps the order");
+        assert_eq!(Tuning::parse(Some("boost"), Some(7.0)), Tuning { approved: ApprovedOrder::Boost, recency: 1.0, rerank: true, as_of: None });
+        assert!(!Tuning::parse(None, None).with_rerank(Some("off")).rerank && Tuning::parse(None, None).with_rerank(None).rerank, "rerank is on unless off");
+        assert_eq!(Tuning::parse(None, None), Tuning::DEFAULT);
+    }
+
+    /// Recency: with equal relevance the newer record leads; at recency 0 nothing moves; an id alias stays first.
+    #[test]
+    fn recency_lifts_the_newer_of_two_equally_relevant_records() {
+        let store = Store::memory().unwrap();
+        let c = store.conn().unwrap();
+        let day = 86_400_000i64;
+        let now = 400 * day;
+        let row = |id: &str, at: i64| {
+            c.execute("INSERT INTO observations(id, channel, author, kind, content, cargo, tags_json, created_ms, ts_ms, nonce, client_op, pubkey, sig) \
+                       VALUES (?1, 'r', 'x', 'say', 'same words', '{}', '[]', ?2, ?2, ?1, ?1, 'k', 's')", params![id, at]).unwrap();
+            c.last_insert_rowid()
+        };
+        let (old, new, alias) = (row("OBS-old", now - 90 * day), row("OBS-new", now - day), row("OBS-alias", now - 300 * day));
+        let fused = vec![(alias, ALIAS_SCORE), (old, 0.0300), (new, 0.0295)];
+        let mut same = fused.clone();
+        reweigh_recent(&c, &mut same, 0.0, now).unwrap();
+        assert_eq!(same, fused, "recency 0 changes nothing");
+        let mut r = fused.clone();
+        reweigh_recent(&c, &mut r, 0.3, now).unwrap();
+        assert_eq!(r.iter().map(|x| x.0).collect::<Vec<_>>(), vec![alias, new, old]);
+    }
+}
+
+/// How approved observations place in a ranking (Blaze, 3 Nov 2026, choosing "Recall first: rank by relevance" after
+/// Hindsight found 19 of 20 real moments and Oracle 12: approved readings that share three of five words with a
+/// conversational question took the first five places and buried the record that answered it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovedOrder {
+    /// The first five approved records about the query go to the front (31 Oct 2026, [`approved_first`]).
+    Lead,
+    /// Approved records about the query rise at most [`APPROVED_BOOST`] places; relevance keeps the order.
+    Boost,
+    /// No reordering by approval; strays (approved, not about the query) still go below what is.
+    Off,
+}
+
+/// The ranking options of one search: how approved records place, and how much recency counts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tuning {
+    pub approved: ApprovedOrder,
+    /// 0 to 1: a record's fused score is multiplied by `1 + recency * 2^(-age / RECENCY_HALF_LIFE_DAYS)`.
+    pub recency: f64,
+    /// The cross-encoder orders the first [`RERANK_DEPTH`] candidates when one is configured; `rerank=off` keeps the fused order.
+    pub rerank: bool,
+    /// Search as of a moment (`as_of=`, [`oracle_proto::parse_when`]): only what was written by then, validity judged then.
+    pub as_of: Option<i64>,
+}
+impl Tuning {
+    pub const DEFAULT: Tuning = Tuning { approved: ApprovedOrder::Lead, recency: 0.0, rerank: true, as_of: None };
+    pub fn parse(approved: Option<&str>, recency: Option<f64>) -> Tuning {
+        let approved = match approved {
+            Some("boost") => ApprovedOrder::Boost,
+            Some("off") => ApprovedOrder::Off,
+            _ => ApprovedOrder::Lead,
+        };
+        Tuning { approved, recency: recency.filter(|r| r.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0), rerank: true, as_of: None }
+    }
+    /// The same, with the rerank switch (`rerank=off`).
+    pub fn with_rerank(self, rerank: Option<&str>) -> Tuning {
+        Tuning { rerank: rerank != Some("off"), ..self }
+    }
+    /// The same, searching as of a moment.
+    pub fn with_as_of(self, as_of: Option<i64>) -> Tuning {
+        Tuning { as_of, ..self }
+    }
+}
+
+/// How many of the first candidates the cross-encoder reorders (3 Nov 2026: on 20 real moments 16 answers were in the
+/// first 30 and 13 in the first 5; Hindsight reranks about 300 in 7.4 s, 30 take about 2 s here).
+pub const RERANK_DEPTH: usize = 30;
+/// The passage of a record the reranker reads: about 60 words around the first query word it holds.
+const RERANK_CHARS: usize = 360;
+/// A mind is named in a query only when it has signed at least this many records (a one-off seat is not a voice).
+const MIND_MIN_RECORDS: i64 = 20;
+
+/// The passage of `content` the reranker reads: RERANK_CHARS characters from a little before the first of `words` it holds
+/// (case-insensitive), or its start; cut on character boundaries.
+pub(crate) fn passage(content: &str, words: &[String]) -> String {
+    let lower = content.to_lowercase();
+    let at = words.iter().filter_map(|w| lower.find(w.as_str())).min().unwrap_or(0);
+    // `lower` can differ in byte length from `content` for some scripts; clamp and step to a boundary in `content`.
+    let mut start = at.saturating_sub(80).min(content.len());
+    while !content.is_char_boundary(start) { start -= 1; }
+    // Open on a whole word: past the rest of the word the window would cut, when there is a space before the match.
+    if start > 0 {
+        let mut to = at.min(content.len()).max(start);
+        while !content.is_char_boundary(to) { to -= 1; }
+        if let Some(sp) = content[start..to.max(start)].find(char::is_whitespace) { start += sp; }
+    }
+    let mut end = (start + RERANK_CHARS).min(content.len());
+    while !content.is_char_boundary(end) { end -= 1; }
+    content[start..end].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The minds a query names by handle (`rocky`, `emmy`) or by a seat handle without its `-core` (`bobby` for bobby-core),
+/// each with at least MIND_MIN_RECORDS signed records; read from the signed authors on the search's own connection `c` (a
+/// second one could wait forever on a pool of one), cached for ten minutes.
+fn named_minds(store: &Store, c: &Connection, query: &str) -> Vec<String> {
+    let handles = {
+        let mut g = match store.minds.lock() { Ok(g) => g, Err(_) => return vec![] };
+        if g.as_ref().is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(600)) {
+            let read = || -> rusqlite::Result<Vec<String>> {
+                let mut st = c.prepare_cached("SELECT author, count(*) FROM observations WHERE envelope=2 GROUP BY author")?;
+                let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows.into_iter().filter(|(h, n)| *n >= MIND_MIN_RECORDS && crate::minds::is_mind(h)).map(|r| r.0).collect())
+            };
+            let Ok(handles) = read() else { return vec![] };
+            *g = Some((std::time::Instant::now(), handles));
+        }
+        g.as_ref().map(|(_, h)| h.clone()).unwrap_or_default()
+    };
+    let words = crate::cortex::words(query);
+    handles.into_iter().filter(|h| {
+        let short = h.strip_suffix("-core").unwrap_or(h);
+        short.len() >= 3 && words.iter().any(|w| w == short || w == h)
+    }).collect()
+}
+
+/// How many places an approved observation about the query may rise under [`ApprovedOrder::Boost`].
+const APPROVED_BOOST: usize = 3;
+/// Recency's half-life, in days (see [`Tuning::recency`]).
+const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
+
+/// Multiply each fused score by the record's recency and re-sort, keeping id aliases first. A record `half_life` days
+/// old gains half of what one written today gains.
+fn reweigh_recent(c: &Connection, ranked: &mut [(i64, f64)], recency: f64, now_ms: i64) -> rusqlite::Result<()> {
+    if recency <= 0.0 {
+        return Ok(());
+    }
+    let mut st = c.prepare_cached("SELECT created_ms FROM observations WHERE seq=?1")?;
+    for (seq, score) in ranked.iter_mut() {
+        if *score >= ALIAS_SCORE {
+            continue;
+        }
+        if let Some(at) = st.query_row(params![*seq], |r| r.get::<_, i64>(0)).optional()? {
+            let days = ((now_ms - at).max(0) as f64) / 86_400_000.0;
+            *score *= 1.0 + recency * (-days / RECENCY_HALF_LIFE_DAYS).exp2();
+        }
+    }
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    Ok(())
 }
 
 /// Which ranking `search_ranked` uses: the live one, or an arm being measured (Round 50, ox eval).
@@ -5124,6 +5468,8 @@ pub(crate) fn index_stored(tx: &rusqlite::Transaction<'_>, env: &Envelope, id: &
 thread_local! {
     /// The stage times of the last search on this thread ([`Store::search_in`]), read once by the handler.
     pub static SEARCH_LAPS: std::cell::RefCell<Vec<(&'static str, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The ranking options of the search running on this thread (set by the handler, read by `search_in_timed`).
+    pub static SEARCH_TUNING: std::cell::RefCell<Tuning> = const { std::cell::RefCell::new(Tuning::DEFAULT) };
 }
 
 /// The server clock in unix ms, for callers outside this crate (the sync loop).

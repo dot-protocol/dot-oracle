@@ -282,6 +282,19 @@ pub fn fold(rows: &[Observation]) -> Cortex {
                     if n.wikidata.is_none() {
                         n.wikidata = field(&cargo, "wikidata").map(str::to_owned);
                     }
+                    // A later record of the same node revises what can change after approval: the note, the labels, the
+                    // intents (Brain cases, 3 Nov 2026: 18 approved notes went out with unfilled placeholders and could only be
+                    // corrected beside the node). Rows come oldest first, so the newest field present wins; the first record
+                    // stays the node's mint, and its source and quote never move (they are what the nid is made of).
+                    if let Some(note) = field(&cargo, "note") {
+                        n.note = Some(note.to_owned());
+                    }
+                    if n.kind == "observation" && cargo["labels"].is_array() {
+                        n.labels = strings(&cargo["labels"]);
+                    }
+                    if cargo["intents"].is_array() {
+                        n.intents = strings(&cargo["intents"]);
+                    }
                 }
                 None => {
                     nodes.insert(nid.clone(), Node {
@@ -606,6 +619,8 @@ pub struct ConceptIndex {
     /// extract, a conversation index line) that matched better (Blaze, 30 Oct 2026: "the approved marks are actual verified
     /// cortex nodes that should hit on every oracle recall").
     pub quotes: Vec<(String, String)>,
+    /// Each concept or entity node's [`certification`], in the order of `nodes`.
+    pub cert: Vec<Certification>,
 }
 
 /// The shortest approved quote recall compares with copies: a shorter one ("Yes", "the state") would find itself everywhere.
@@ -632,6 +647,11 @@ pub struct GraphMatch {
 }
 
 impl ConceptIndex {
+    /// The certification of the concept or entity a [`GraphMatch`] names by `title`.
+    pub fn certified(&self, title: &str) -> Option<Certification> {
+        self.nodes.iter().position(|(_, t, _)| t == title).map(|i| self.cert[i])
+    }
+
     pub fn build(c: &Cortex, class: &BTreeMap<String, Attestation>) -> ConceptIndex {
         let mut ix = ConceptIndex::default();
         let mut slot: BTreeMap<&str, usize> = BTreeMap::new();
@@ -663,6 +683,9 @@ impl ConceptIndex {
                 ix.quotes.push((n.minted_by.clone(), q));
             }
         }
+        let roots: BTreeSet<&str> = approved.keys().copied().collect();
+        let by_nid: BTreeMap<&str, &Node> = c.nodes.iter().map(|n| (n.nid.as_str(), n)).collect();
+        ix.cert = ix.nodes.iter().map(|(nid, _, _)| certification(by_nid[nid.as_str()], &by_nid, &roots)).collect();
         for n in c.nodes.iter().filter(|n| approved.contains_key(n.nid.as_str())) {
             for l in n.out.iter().filter(|l| l.kind == "about") {
                 if let Some(&i) = slot.get(l.to.as_str()) {
@@ -785,6 +808,38 @@ fn approval<'a>(n: &'a Node, class: &BTreeMap<String, Attestation>) -> Option<(&
     n.verdict.as_ref().filter(|v| v.verdict == "approve").map(|v| (v, class.get(&v.message).copied().unwrap_or(Attestation::Unverified)))
 }
 
+/// How much of a node the owner has approved: its state, the approved readings and the readings counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Certification {
+    pub state: &'static str,
+    pub approved: usize,
+    pub readings: usize,
+}
+
+/// A node's certification, rolled up from its parts the way NVIDIA Auto Ontology rolls up a term (dal/terms.py `_certification`:
+/// certified, partial or pending; Blaze, 3 Nov 2026: "add check_answerable and partial state to oracle"). A question, entity or
+/// concept is `approved` when every current reading linked to it is approved, `partial` when some are, `pending` when none is. A
+/// reading the owner rejected is out of the count (he said it is not this), and so is a superseded one. An observation is its own
+/// verdict: `approved` (a verdict that counts, in `roots`), `rejected`, or `pending`.
+pub fn certification(n: &Node, by_nid: &BTreeMap<&str, &Node>, roots: &BTreeSet<&str>) -> Certification {
+    let rejected = |n: &Node| n.verdict.as_ref().is_some_and(|v| v.verdict == "reject");
+    if n.kind == "observation" {
+        let yes = roots.contains(n.nid.as_str());
+        let state = if yes { "approved" } else if rejected(n) { "rejected" } else { "pending" };
+        return Certification { state, approved: yes as usize, readings: 1 };
+    }
+    let readings: BTreeSet<&str> = n.inbound.iter().filter(|l| l.kind != "said-by").map(|l| l.from.as_str())
+        .filter(|f| by_nid.get(f).is_some_and(|r| r.kind == "observation" && r.superseded_by.is_none() && (roots.contains(f) || !rejected(r))))
+        .collect();
+    let approved = readings.iter().filter(|f| roots.contains(*f)).count();
+    let state = match approved {
+        0 => "pending",
+        a if a == readings.len() => "approved",
+        _ => "partial",
+    };
+    Certification { state, approved, readings: readings.len() }
+}
+
 /// Nodes (one room, one kind, or titles and aliases containing `q`), with their live marks counted, newest first.
 ///
 /// The Cortex is what Blaze approved (Blaze's ruling via Noor, 28 Oct 2026): by default
@@ -823,12 +878,49 @@ pub fn counts(s: &Store) -> Result<Value> {
         "approved_observations": approved.len(), "pending_marks": pending, "marks": c.marks.len()}))
 }
 
+/// The labels that make an approved reading law for every seat (Noor, 3 Nov 2026: "approved
+/// readings labelled rule or preference load into every brief as LAW lines"; a Profile reading is how Blaze works, which every seat
+/// needs as much as a rule).
+pub const LAW_LABELS: [&str; 3] = ["Rule", "Profile", "Preference"];
+
+/// One line of law from a reading: the note's INTENT line when it has one, else the note's first line, else the quote; at most
+/// 240 bytes, cut on a character boundary.
+fn law_line(n: &Node) -> String {
+    let note = n.note.as_deref().unwrap_or("");
+    let pick = note.lines().find_map(|l| l.trim().strip_prefix("INTENT:").map(str::trim))
+        .or_else(|| note.lines().map(str::trim).find(|l| !l.is_empty()))
+        .or(n.quote.as_deref()).unwrap_or(&n.title);
+    let mut end = pick.len().min(240);
+    while !pick.is_char_boundary(end) { end -= 1; }
+    if end < pick.len() { format!("{}…", pick[..end].trim_end()) } else { pick.to_owned() }
+}
+
+/// `GET /cortex/law?top=n` (schema cortex-law/1): what Blaze approved and labelled Rule, Profile or Preference, one line each, the
+/// readings most linked to first, then the newest. Only a verdict that counts (his key, or attested for him); a superseded reading
+/// is out. `top` keeps the first n and `total` says how many there are.
+pub fn law(s: &Store, top: Option<usize>) -> Result<Value> {
+    let (c, class) = s.cortex_with_classes()?;
+    let approved = approved_roots(&c, &class);
+    let linked = |n: &Node| n.inbound.iter().filter(|l| l.kind != "said-by").count();
+    let mut rows: Vec<&Node> = c.nodes.iter()
+        .filter(|n| approved.contains(n.nid.as_str()) && n.labels.iter().any(|l| LAW_LABELS.contains(&l.as_str())))
+        .collect();
+    rows.sort_by(|a, b| linked(b).cmp(&linked(a)).then(b.minted_ms.cmp(&a.minted_ms)).then(a.nid.cmp(&b.nid)));
+    let total = rows.len();
+    let lines: Vec<Value> = rows.iter().take(top.unwrap_or(total)).map(|n| serde_json::json!({
+        "code": n.minted_by, "nid": n.nid, "labels": n.labels, "line": law_line(n), "linked": linked(n), "minted_ms": n.minted_ms,
+        "approval": approval(n, &class).map(|(v, _)| v.message.clone())})).collect();
+    Ok(serde_json::json!({"schema": "cortex-law/1", "total": total, "shown": lines.len(), "labels": LAW_LABELS, "lines": lines}))
+}
+
 pub fn nodes(s: &Store, room: Option<&str>, kind: Option<&str>, q: Option<&str>, all: bool) -> Result<Value> {
     let (c, class) = s.cortex_with_classes()?;
     let approved = approved_roots(&c, &class);
     let in_cortex = |n: &Node| in_cortex(n, &approved);
     let q = q.map(|x| x.to_lowercase());
     let by_id: BTreeMap<&str, &Mark> = c.marks.iter().map(|m| (m.id.as_str(), m)).collect();
+    let by_nid: BTreeMap<&str, &Node> = c.nodes.iter().map(|n| (n.nid.as_str(), n)).collect();
+    let roots = &approved;
     let mut out: Vec<Value> = c.nodes.iter()
         .filter(|n| room.is_none_or(|r| n.room == r) && kind.is_none_or(|k| n.kind == k))
         .filter(|n| q.as_deref().is_none_or(|q| n.title.to_lowercase().contains(q) || n.aliases.iter().any(|a| a.to_lowercase().contains(q))))
@@ -841,9 +933,10 @@ pub fn nodes(s: &Store, room: Option<&str>, kind: Option<&str>, q: Option<&str>,
             let ms: Vec<&&Mark> = n.marks.iter().filter_map(|(id, _)| by_id.get(id.as_str())).collect();
             let approved = ms.iter().filter(|m| m.verdict.as_ref().is_some_and(|v| v.verdict == "approve")).count();
             let rejected = ms.iter().filter(|m| m.verdict.as_ref().is_some_and(|v| v.verdict == "reject")).count();
+            let cert = certification(n, &by_nid, roots);
             serde_json::json!({"nid": n.nid, "kind": n.kind, "form": n.form, "shape": n.shape, "title": n.title, "aliases": n.aliases, "room": n.room, "minted_ms": n.minted_ms,
                 "quote": n.quote, "source": n.source, "out": n.out.len(), "in": n.inbound.len(),
-                "readings": readings, "marks": ms.len(), "approved": approved, "rejected": rejected,
+                "readings": readings, "readings_total": cert.readings, "certification": cert.state, "marks": ms.len(), "approved": approved, "rejected": rejected,
                 "verdict": n.verdict.as_ref().map(|v| v.verdict.clone()), "status": n.status.as_ref().map(|v| v.verdict.clone()).or_else(|| (n.kind == "question").then(|| "open".into())),
                 "approval": approval(n, &class).map(|(v, a)| serde_json::json!({"verdict": v.message, "by": v.by, "signed_by": v.signed_by, "via": v.via, "class": a.as_str(), "counts": a.counts()})),
                 "cortex": in_cortex(n), "superseded_by": n.superseded_by})
@@ -895,6 +988,85 @@ mod tests {
             content: "c".into(), cargo: Some(cargo.to_string()), tags, created_ms: 1_000 + seq, authored_ms: None, pubkey: String::new(), sig: String::new(), envelope: 2 }
     }
     fn id(seq: i64) -> String { format!("OBS-brain-20261018-{seq:012x}") }
+
+    #[test]
+    fn law_lines_take_the_intent_else_the_first_line_and_cut_on_a_character() {
+        let mut n = Node { nid: "x".into(), kind: "observation".into(), title: "the title".into(), aliases: vec![], wikidata: None, room: "cortex".into(),
+            minted_by: id(1), superseded_by: None, author: "brain".into(), minted_ms: 1, source: Value::Null, quote: Some("the quote".into()),
+            form: String::new(), labels: vec!["Rule".into()], shape: String::new(), drafted_by: None,
+            note: Some("FRAME: a ladder\nINTENT: Automate whatever is done twice.\nLINKS: m2155".into()), speaker: None, project: None,
+            intents: vec![], verdict: None, status: None, notes: vec![], marks: vec![], out: vec![], inbound: vec![] };
+        assert_eq!(law_line(&n), "Automate whatever is done twice.");
+        n.note = Some("\n  One best option, never a menu.\nmore".into());
+        assert_eq!(law_line(&n), "One best option, never a menu.", "no INTENT: the first line that holds words");
+        n.note = None;
+        assert_eq!(law_line(&n), "the quote");
+        n.note = Some("é".repeat(200));
+        let l = law_line(&n);
+        assert!(l.ends_with('…') && l.len() <= 243, "cut at 240 bytes on a character boundary: {}", l.len());
+    }
+
+    #[test]
+    fn a_later_record_of_the_same_node_revises_its_note_labels_and_intents_and_keeps_its_mint() {
+        use serde_json::json as j;
+        let ob = |seq: i64, note: Option<&str>, labels: Option<&[&str]>| {
+            let mut c = j!({"kind": "observation", "title": "agents bid on tasks", "source": {"message": "OBS-cases-1", "start": 0, "end": 5},
+                "quote": "agents bid on tasks", "intents": ["build"]});
+            if let Some(n) = note { c["note"] = j!(n); }
+            if let Some(l) = labels { c["labels"] = j!(l); }
+            obs(seq, "brain", "cortex:node", c, &[])
+        };
+        let first = fold(&[ob(1, Some("Builds on {A}."), Some(&["Vision"]))]);
+        let nid = observation_nid("OBS-cases-1", 0, 5);
+        let node = |c: &Cortex| c.nodes.iter().find(|n| n.nid == nid).cloned().expect("the node");
+        assert_eq!(node(&first).note.as_deref(), Some("Builds on {A}."), "control: one record, its own note");
+        let c = fold(&[ob(1, Some("Builds on {A}."), Some(&["Vision"])), ob(2, Some("Builds on prompt #12."), Some(&["Vision", "Breakthrough"]))]);
+        assert!(c.rejected.is_empty(), "{:?}", c.rejected);
+        assert_eq!(c.nodes.iter().filter(|n| n.nid == nid).count(), 1, "one node, not two");
+        let n = node(&c);
+        assert_eq!(n.note.as_deref(), Some("Builds on prompt #12."), "the newer note wins");
+        assert_eq!(n.labels, vec!["Vision", "Breakthrough"]);
+        assert_eq!((n.minted_by.as_str(), n.quote.as_deref()), (id(1).as_str(), Some("agents bid on tasks")), "the mint and the quote stay");
+        let kept = fold(&[ob(1, Some("Builds on prompt #12."), Some(&["Vision"])), ob(2, None, None)]);
+        assert_eq!((node(&kept).note.as_deref(), node(&kept).labels.clone()), (Some("Builds on prompt #12."), vec!["Vision".to_owned()]),
+            "a later record without the fields leaves them as they were");
+    }
+
+    #[test]
+    fn a_node_is_approved_partial_or_pending_by_its_readings_and_a_rejected_reading_is_out_of_the_count() {
+        use serde_json::json as j;
+        let ob = |seq: i64, start: u64| obs(seq, "brain", "cortex:node", j!({"kind": "observation", "title": format!("reading {seq}"),
+            "source": {"message": "OBS-cases-1", "start": start, "end": start + 5}, "quote": format!("reading {seq}")}), &[]);
+        let link = |seq: i64, from: &str, to: &str| obs(seq, "brain", "cortex:link", j!({"from": from, "to": to, "kind": "about"}), &[]);
+        let verdict = |seq: i64, target: &str, v: &str| obs(seq, "brain", "cortex:verdict", j!({"target": target, "verdict": v, "by": "blaze", "via": "cases-page"}), &[]);
+        let o = |start: u64| observation_nid("OBS-cases-1", start, start + 5);
+        let (agents, state, pixar) = (nid_of("concept", "company of agents"), nid_of("concept", "state"), nid_of("entity", "Pixar"));
+        let rows = vec![
+            obs(1, "brain", "cortex:node", j!({"kind": "concept", "title": "company of agents"}), &[]),
+            obs(2, "brain", "cortex:node", j!({"kind": "concept", "title": "state"}), &[]),
+            obs(3, "brain", "cortex:node", j!({"kind": "entity", "title": "Pixar"}), &[]),
+            ob(4, 0), ob(5, 10), ob(6, 20), ob(7, 30), ob(8, 40),
+            link(9, &o(0), &agents), link(10, &o(10), &agents), link(11, &o(20), &agents), link(12, &o(30), &state), link(13, &o(40), &pixar),
+            verdict(14, &o(0), "approve"), verdict(15, &o(20), "reject"), verdict(16, &o(30), "approve"),
+        ];
+        let c = fold(&rows);
+        assert!(c.rejected.is_empty(), "{:?}", c.rejected);
+        let class: BTreeMap<String, Attestation> = [14, 15, 16].iter().map(|s| (id(*s), Attestation::Owner)).collect();
+        let ix = ConceptIndex::build(&c, &class);
+        let cert = |t: &str| ix.certified(t).map(|c| (c.state, c.approved, c.readings));
+        assert_eq!(cert("company of agents"), Some(("partial", 1, 2)), "one approved, one waiting; the rejected one does not count");
+        assert_eq!(cert("state"), Some(("approved", 1, 1)));
+        assert_eq!(cert("Pixar"), Some(("pending", 0, 1)), "nothing approved yet");
+        assert_eq!(cert("no such node"), None);
+        // An agent's approval is not the owner's: the reading stays pending, and the concept with it.
+        let agent: BTreeMap<String, Attestation> = [(id(14), Attestation::Agent), (id(15), Attestation::Owner), (id(16), Attestation::Owner)].into_iter().collect();
+        assert_eq!(ConceptIndex::build(&c, &agent).certified("company of agents").map(|c| c.state), Some("pending"));
+        // Observations are their own verdict.
+        let roots: BTreeSet<&str> = approved_roots(&c, &class);
+        let by_nid: BTreeMap<&str, &Node> = c.nodes.iter().map(|n| (n.nid.as_str(), n)).collect();
+        let of = |nid: &str| certification(by_nid[nid], &by_nid, &roots).state;
+        assert_eq!((of(&o(0)), of(&o(10)), of(&o(20))), ("approved", "pending", "rejected"));
+    }
 
     #[test]
     fn a_query_reaches_approved_observations_through_concepts_entities_and_forms() {

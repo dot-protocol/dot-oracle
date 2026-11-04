@@ -170,17 +170,21 @@ fn a_review_ask_points_at_a_ref() {
 }
 
 #[test]
-fn an_unanswered_decide_or_review_past_its_clock_is_overdue() {
+fn an_unanswered_decide_past_its_expiry_is_set_aside_not_left_open() {
+    // Blaze, 4 Nov 2026: an ask is due now; its `by:` is its expiry, and past it the ask leaves the open list.
     let s = oracle();
     let past = (NOW - HOUR).to_string();
     let future = (NOW + HOUR).to_string();
     let late = try_write(&s, ("core", "rocky"), Kind::Say, "ship?", Some(OPTS), &["ask:decide", "to:blaze", &format!("by:{past}")], 2 * HOUR).unwrap();
     let fine = try_write(&s, ("core", "rocky"), Kind::Say, "and this?", Some(OPTS), &["ask:decide", "to:blaze", &format!("by:{future}")], 2 * HOUR).unwrap();
     let a = asks_for(&s, "blaze", None, StateFilter::All, NOW).unwrap();
-    let get = |id: &str| a.waiting_on_me.iter().find(|r| r.id == id).unwrap();
-    assert!(get(&late).overdue);
-    assert!(!get(&fine).overdue);
-    assert_eq!(get(&late).by_ms, Some(NOW - HOUR));
+    assert!(a.waiting_on_me.iter().all(|r| r.id != late), "past its expiry it is not open");
+    let set = a.aside.iter().find(|r| r.id == late).expect("it is set aside, still readable");
+    assert!(set.overdue && set.by_ms == Some(NOW - HOUR));
+    assert!(a.waiting_on_me.iter().any(|r| r.id == fine && !r.overdue), "before its expiry it is open, and due now");
+    assert_eq!(a.totals.aside, 1);
+    let r = asks_for(&s, "rocky", None, StateFilter::All, NOW).unwrap();
+    assert!(r.im_waiting_on.iter().all(|x| x.id != late) && r.aside.iter().any(|x| x.id == late), "the asker's list sets it aside too");
 }
 
 #[test]
@@ -526,18 +530,18 @@ fn an_ask_older_than_the_newest_page_of_its_tag_is_still_found_and_totals_are_wh
     assert_eq!(b.waiting_on_me.len(), oracle_server::asks::LIST_CAP, "the rows are cut, the total is not");
 }
 
-/// An unanswered ask past its time-to-live is still owed (Blaze 2026-09-30; Emmy's Room contract 2026-10-04):
-/// a question whose intent gives it a fuse is listed and marked `aged` once the fuse is spent. A declared ask has no
-/// fuse at all (Blaze 2026-10-10, projection.rs): it stays open, never aged.
+/// An undeclared question past its fuse is set aside (Blaze, 4 Nov 2026: "older things don't just keep lying around"),
+/// marked `aged`. A declared ask has no fuse unless its author set one (Blaze 2026-10-10, projection.rs): it stays
+/// open until it is answered or its own `by:` passes.
 #[test]
-fn an_unanswered_ask_past_its_clock_is_still_listed_and_marked_aged() {
+fn an_undeclared_question_past_its_fuse_is_set_aside_and_a_declared_ask_stays_open() {
     let s = oracle();
     let old = say(&s, "core", "rocky", "which port, still?", &["intent:question", "to:dinesh"], 20 * DAY);
     let fresh = say(&s, "core", "rocky", "and this one?", &["intent:question", "to:dinesh"], HOUR);
     let declared = say(&s, "core", "rocky", "@dinesh the licence file?", &["ask:act", "to:dinesh"], 20 * DAY);
     let d = asks_for(&s, "dinesh", None, StateFilter::Open, NOW).unwrap();
-    let row = d.waiting_on_me.iter().find(|r| r.id == old).expect("a 20-day-old unanswered question is still waiting");
-    assert!(row.aged, "and says it is old");
+    assert!(d.waiting_on_me.iter().all(|r| r.id != old), "a 20-day-old undeclared question is not left open");
+    assert!(d.aside.iter().find(|r| r.id == old).expect("it is set aside").aged);
     assert!(!d.waiting_on_me.iter().find(|r| r.id == fresh).unwrap().aged);
     let act = d.waiting_on_me.iter().find(|r| r.id == declared).expect("a declared ask is waiting");
     assert!(!act.aged && act.state == "open", "a declared ask has no fuse: open, not aged");

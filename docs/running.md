@@ -168,3 +168,25 @@ The secrets are files only this process reads (0600), never environment variable
 ## Store lanes (19 Oct 2026)
 
 `ORACLE_STORE_LANES` (default 3): how many store calls run at once. The store is one SQLite database under one lock; calls beyond the lanes wait in order instead of fighting for the lock, which on a copy of the live database turned six parallel `/asks` from 18.3 CPU-seconds back toward the 4.8 they cost in turn. Raise it only with a measurement.
+
+## One command: `oracle up`
+
+From a fresh machine (after `scripts/install.sh` put `oracle` and `ox` on PATH):
+
+```bash
+oracle up            # shows the plan, asks, then does it
+oracle up --plan     # the plan only; nothing changes
+```
+
+It makes the Oracle and your owner key in `~/.oracle-node` (if there is none), gives your agents a seat (`agent`), runs the server as a
+per-user service (launchd on macOS, systemd --user on Linux) on 127.0.0.1:8900, points `ox` at it in `~/.oracle`, connects every agent
+it finds (Claude Code, Codex, Cursor) over MCP, and ends with `ox doctor`. It never needs root and never overwrites an `ox` home that
+already holds a seat (`--ox-home <folder>` gives a second seat its own). `--agents claude-code,codex` or `none` picks which agents;
+`--no-service` leaves running the server to you; `--yes` skips the question. Windows has no per-user service yet: `oracle up` says so
+and tells you the one `oracle serve` command to run.
+
+The plan comes from a read-only look: `--plan`, or answering no, leaves every file as it was. What is already there is kept: an
+agent's existing `oracle` MCP server, a SessionStart hook already in place, a service file `oracle up` wrote before. A conflict (a
+service or a Cursor `oracle` entry that points at another Oracle, a settings file it cannot read) stops the plan and names the file;
+nothing is replaced. If an agent step fails, the run fails and says so; `oracle up --agents-only --agents <list> --ox-home <folder>`
+retries only the agents, on the seat already made. Unverified so far: the systemd --user path on a desktop and all of Windows.

@@ -2,6 +2,103 @@
 
 ## Unreleased
 
+- The recall gate (plan.oracle.search CI-S9): `crates/oracle-server/tests/recall_gate.rs` writes a synthetic team
+  memory (46 signed records, four rooms, `tests/data/recall-gate/`) and asks it 27 fixed questions through the ranked
+  recall agents use, words only and fused with a toy embedder, and fails when any category's count falls below
+  `BASELINE.json` (words 24/24 first; fused 25/27 first, 26/27 in five). The negative control reverses every ranking
+  and must fail. It runs offline in `cargo test`, so CI now catches a ranking change that loses an answer. Two fused
+  misses are recorded as known (docs/SEARCH.md "The recall gate"): a room with no answer still returns its rows on the
+  fused path, and one paraphrase ranks third.
+
+- The installer's edges, proved on every platform before a release publishes (plan.oracle.everyone J7).
+  `scripts/installer-edges.sh` (macOS, Linux) and `scripts/installer-edges.ps1` (Windows) take the release files the
+  workflow built and serve them over HTTP as GitHub would: a home whose path holds a space installs and runs; a second
+  install changes no byte; re-installing over an Oracle in use leaves every file of its home unchanged; an archive
+  changed after its checksum is refused with "checksum mismatch" and the installed binaries stay; with no route to the
+  release it fails within a minute, says "download failed", and installs nothing. `INSTALLER_EDGES_CONTROL=1` serves
+  the untampered archive in the tampered case, and the workflow requires that run to fail. `install.ps1` now says
+  "download failed: <url>; nothing installed" like install.sh, instead of PowerShell's bare web error. Run on core
+  4 Nov 2026 (Linux x86_64): all five pass, the control fails.
+
+- Docs ready for the public tree (v0.1.0, plan.oracle.everyone J2). AGENTS.md says `oracle init` writes the admin token
+  to a 0600 file and never prints it (it said the token was printed once). CONTRIBUTING names the two branches the
+  repository has, `dev` and `prod`, and says a public release is a `vX.Y.Z` tag (it named a `main` that no longer
+  exists). ORACLE.md's release row matches release.sh, which refuses anything but dev. The README runs tests as CI does
+  and no longer carries a test count that went stale. docs/VERIFY.md names no deployment's host, so
+  `ops/public-export/export.py` exits 0 on this commit (0 pattern hits, 0 gitleaks).
+
+- Offline verification (Blaze, 4 Nov 2026, before v0.1.0; docs/VERIFY.md). `ox seats --export keys.json` writes the
+  owner key and the signed key log (`oracle-keys/1`); `ox verify face.jsonl --keys keys.json --owner-key <hex>` replays
+  the log from the owner key with the server's rules and checks each record's signature, id, and that its key was its
+  author's when it signed. No seat, no config, no server: `ox verify` and `ox chain --check` now run before the config
+  is read. Checked on 15,641 live records with the network off; a wrong owner key, one changed record and one forged
+  key event each fail.
+- No phone home (Blaze, 4 Nov 2026, before v0.1.0). `scripts/no-phone-home.sh` runs a new Oracle's first minute (init,
+  serve, a seat, `ox doctor`, say, read, remember, recall, brief, inbox, `oracle up --plan`) where the only network is
+  loopback, with every `connect()` traced, and fails on any connect outside 127.0.0.0/8 or ::1 and on any DNS query.
+  `NO_PHONE_HOME_CONTROL=1` adds one outbound connect, and the test must then fail; the release workflow runs both on
+  Linux. A source audit found no built-in remote host: every default is loopback (the embedder, the extractor, the
+  cases service, the public origin), and every other call goes to an address the user configures.
+- One reflector for the whole Oracle (Blaze, 4 Nov 2026: "there should only be one, Pythia, which would be doing it for all
+  of oracle"). `ox reflect` now reads every seat's memories in a room, not only its own, each with the seat that wrote it,
+  oldest first in batches (`--limit` 24, `--batches` 4), and saves its place after each batch. `--room a,b` reflects on
+  each room on its own, so observations stay in their room. `oracle up` no longer installs a reflection job for each agent
+  (it did since a757476); on core, `ops/systemd/oracle-reflect.timer` runs it as Pythia at 22:00 UTC. The /reflect prompt
+  speaks of the team's observations, and each memory line names its author. A memory is a record tagged `memory:<kind>`:
+  the first live run read the `kind=memory` search, which also returns acks, replies and State heads, and wrote
+  observations about the 3 Nov sweep's closures (archived). An observation whose subject is only its room's name is
+  dropped. `--room all` reads every room in one pass
+  (each room reflected on its own; the first run reads the last day), and `--except` leaves out automated authors.
+
+- Reflection: observations refined, not overwritten (docs/REFLECT.md; the competitor map's reflection row). `ox reflect`
+  sends a seat's own memories since its last reflection, with its current observations, to the new `POST /reflect` (the
+  same local model as /extract; extract.rs `reflect`). What comes back is checked:
+  - a subject that names a thing ("person", "user" or "agent" is refused);
+  - two citations, or a change to a current observation;
+  - only ids it was given.
+
+  The seat signs each observation (`reflection`, `observation:<subject>`, `ref:<id>`, cargo reflect/1). It supersedes
+  every current observation on its subject, inferred when the model leaves `refines` empty, so one is current per subject
+  and the earlier ones are kept. Live on a scratch seat:
+  - six memories gave one observation of the release date that moved (citing both memories);
+  - two later reflections refined it, as the date moved twice;
+  - the third superseded both earlier current observations.
+
+- Capture: coding-agent sessions become signed memories (docs/CAPTURE.md; the competitor map's agent-adapters and
+  session-extraction rows). `oracle up` now gives Claude Code, Codex and Cursor three hooks each, in each agent's own file
+  and shape (`add_hooks`, kept and never duplicated): the brief at session start (`ox brief --hook cursor` prints Cursor's
+  `additional_context` JSON), and `ox capture --hook <agent>` when a session compacts or ends. The hook spools and returns
+  in milliseconds; a detached `ox capture --drain` reads only the turns since the last capture (Claude Code, Codex and plain
+  JSON lines; tool output left out), sends them in pieces to the new `POST /extract`, and signs each decision, lesson,
+  preference and commitment it finds (`memory:<kind>`, `extracted:session`, `capture:<agent>`, cargo capture/1).
+  `/extract` (extract.rs) runs a local Ollama-compatible model (`ORACLE_EXTRACT_URL`, `ORACLE_EXTRACT_MODEL` default
+  qwen3:8b, `ORACLE_EXTRACT_THREADS`, `ORACLE_EXTRACT_CTX`), drops every line the secret scan matches before the model
+  reads it, checks what the model answers, and stores nothing; `/whoami` lists `extract` only when it is configured.
+  Measured on core: on a test session with five planted memories and one status line, all five kept and the status left
+  out, 65 s; a capture with nothing new makes no call; two new turns gave exactly their three memories.
+
+- A TypeScript and JavaScript SDK, `sdk/typescript` (@dot-protocol/oracle 0.1.0, no dependencies, Node 20+): `say`,
+  `remember`, `write`, `recall`, `answerable`, `get`, `thread`, `messages`, `asks`, and the signer underneath
+  (`envelope`, `signingBytes`, `resign`, `keyFromSeed`). Writes follow the author chain the way ox does (signed over the
+  head the server reports, again over a newer head with the same client_op). `test/golden.test.mjs` signs the oracle-say/2
+  golden vector byte for byte, with negative controls; `scripts/e2e.sh` runs the whole client against a fresh server,
+  including a forged author refused. The competitor map's sdks row (more than one language plus REST).
+
+- The room page: `GET /rooms/:ch/page` (room-page/1, docs/ROOM-PAGE.md, room_page.rs), a room's live state composed on every
+  read from its signed records: freshness (newest record, today, this week, how far the meaning index lags the room),
+  the State head and how far the room moved past it, decisions (30 days), what is building, what waits on someone, what
+  moved, who spoke, and the newest seat reading with its age. Blaze, 3 Nov 2026: a page is the state of the room, not a
+  questionnaire. Authorized like room-view/1. `Semantic::indexed_through`. Test tests/room_page.rs with negative controls.
+- Search ranking options for measured A/B (`approved=lead|boost|off`, `recency=0..1`; store::Tuning): the default stays
+  `lead`; `ox recall --eval --param` passes them. Blaze, 3 Nov 2026: "Recall first: rank by relevance".
+
+- The brief prints how to tell the owner under NOW on every wake (TELL: the decide command with every flag the
+  contract checks, the reply form, and the check that the card landed as `<id>#ask`). The oracle skill's messaging note
+  now names the gap flags and its example passes the contract (it used `--absent none` with no citation, which the
+  store refuses). Blaze, 3 Nov 2026: the format belongs in the core brief, not in a lookup.
+
+- The `oracle` skill (Blaze, 2 Nov 2026: "Oracle needs a skill … how to send me a message, how to search Oracle, what to search for, what to connect, what not to connect, how to use the schema, how to give back, when to query, how many times during each turn, how to evaluate"). `skills/oracle`: SKILL.md (the turn in order; when to search and a budget of one search per new topic, three at most a turn, from measured latency; reading a hit; telling the owner; the write-back table; linking; checking receipts), five references one level deep (search, messaging, writing, schema, evaluate) and six eval scenarios. It is in the Agent Skills format (name, description under 1,024 characters, license, compatibility, metadata) and carries no estate's names: who the owner is and what the rules are come from the brief. Built into ox (`join::SKILL`, include_str), and `ox connect <agent>` writes it where that agent reads skills before adding the MCP server, so a seat that connected before gets it by connecting again; an unchanged copy is left alone, a different one is moved whole to `<home>/skill-backup/<time>` (never beside the skill, where a second `oracle` would collide), and `--dry-run` writes nothing. Tests the_built_in_skill_meets_the_agent_skills_format and the_skill_installs_once_keeps_an_edited_copy_and_dry_runs_write_nothing. README (connect), `ox connect --help`.
+
 - WORLD STATE: `GET /world` (schema world/1; oracle-server world.rs) composes the page a mind reads to know where the world stands, from signed heads, never a retyped document (Blaze's priority relayed by Noor; Noor's schema; the five-verbs card item 7). Six bounded sections, each with `more` and `rest`: north star (the canon head, the identity heads), now (plan steps marked doing, the owner's queue/1), active projects (task heads running or blocked), key decisions (memory:decision in the last 7 days), active seats (each seat's State line), open questions (decide asks to the owner unanswered). Private rooms never appear, as a line or a count; bounded reads only; the route keeps the answer 30 s. `oracle_brief where=world`, the `brief` verb with where=world, and `ox brief --where world` print the same text (`oracle_mcp::world_value`, `world_render`), under 6,000 bytes; an older server without /world is told so by name. Tests: crates/oracle-server/tests/world.rs (a seeded store past every bound, over HTTP and through POST /mcp, the byte ceiling, a private room's records absent) and the oracle-mcp world tests. docs/mcp.md, docs/ox.md, docs/openapi.yaml. Started by forge-budgets, finished by Rocky.
 
 - The brief prints the fold pages whole after the identity head (Blaze, 1 Nov 2026, option 1: no schema change; exam runs 1 to 3 in). `fold_pages`: the seat's server-verified `doc/1` records in its own room tagged `identity:fold`, oldest first, at most 64 KB in all (`FOLD_MAX_BYTES`), the rest named with their sizes, never cut mid-page; a page by another seat or not a `doc/1` is named and ignored; read only when a head exists. `brief_value` carries `identity_fold`; `brief_render` prints the FOLD block right after WHO I AM, so `ox brief` and `oracle_brief` print the same. Test the_brief_prints_the_fold_pages_whole_after_the_head_and_names_what_it_cuts (two pages in batch order, a forged one named, a page over the cap named with its size, no head no fold, no records no block). docs/IDENTITY.md "The fold".
