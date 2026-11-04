@@ -852,6 +852,15 @@ pub fn parse_when(s: &str) -> Option<i64> {
 
 /// Milliseconds since the epoch as ISO-8601 UTC with millisecond precision: `2026-09-20T18:21:07.412Z`.
 /// Written out by hand so the wire format needs no date library (days-to-civil, Howard Hinnant).
+/// The wall clock in unix milliseconds: the one clock the server, the MCP door and ox share (code audit, 4 Nov 2026: it
+/// was written four times, and the store reached into the HTTP layer for its copy). A clock before 1970 reads as 0.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub fn iso_ms(ms: i64) -> String {
     let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
     let z = days + 719_468;

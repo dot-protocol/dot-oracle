@@ -3088,7 +3088,7 @@ impl Store {
                         "cargo":old.6,"tags_json":old.7,"created_ms":old.8,"pubkey":old.9,"sig":old.10}}).to_string();
                     tx.execute(
                         "INSERT OR IGNORE INTO legacy_sources VALUES(?1,?2,?3,?4)",
-                        params![r.id, sha_hex(&previous), previous, crate::http::now_ms()],
+                        params![r.id, sha_hex(&previous), previous, oracle_proto::now_ms()],
                     )?;
                     tx.execute("UPDATE observations SET author=?2,kind=?3,content=?4,cargo=?5,tags_json=?6,created_ms=?7,ts_ms=?7,pubkey=?8,sig=?9 WHERE id=?1 AND envelope=1",
                         params![r.id,r.author,r.kind,r.content,r.cargo,tags_json,r.created_ms,r.pubkey,r.sig])?;
@@ -3109,7 +3109,7 @@ impl Store {
                     .map_err(|e| StoreError::Internal(e.to_string()))?;
                 tx.execute(
                     "INSERT OR IGNORE INTO legacy_sources VALUES(?1,?2,?3,?4)",
-                    params![r.id, sha_hex(&payload), payload, crate::http::now_ms()],
+                    params![r.id, sha_hex(&payload), payload, oracle_proto::now_ms()],
                 )?;
             }
             let n = tx.execute(
@@ -5472,10 +5472,8 @@ thread_local! {
     pub static SEARCH_TUNING: std::cell::RefCell<Tuning> = const { std::cell::RefCell::new(Tuning::DEFAULT) };
 }
 
-/// The server clock in unix ms, for callers outside this crate (the sync loop).
-pub fn now_ms_pub() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
-}
+/// The server clock in unix ms (`oracle_proto::now_ms`), under the name the sync loop and recall already call.
+pub use oracle_proto::now_ms as now_ms_pub;
 
 /// Puts `cited_by` on the hits from one citation read for the whole response (Emmy, 26 Oct: once per response, not per
 /// hit; recall stays whole when the enrichment fails). Returns the response-level status: `measured` with the watermark,

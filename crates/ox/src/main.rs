@@ -1430,12 +1430,7 @@ fn ipv4_first(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
     Ok(addrs)
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+use oracle_proto::now_ms;
 
 fn home_dir(given: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(h) = given {

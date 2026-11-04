@@ -597,7 +597,7 @@ impl Semantic {
             .spawn(move || {
                 let mut last_prune = 0i64;
                 loop {
-                    let now = crate::http::now_ms();
+                    let now = oracle_proto::now_ms();
                     let msg = match me.index_pass(&main_db, 64) {
                         Ok(0) => None,
                         Ok(n) => Some(format!("embedded {n}")),

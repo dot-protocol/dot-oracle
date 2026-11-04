@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- One clock (code audit, 4 Nov 2026): `oracle_proto::now_ms` replaces four identical copies (http, store, oracle-mcp,
+  ox); `http::now_ms` and `store::now_ms_pub` re-export it, so callers are unchanged, and the store no longer reaches
+  into the HTTP layer for the time. scoreboard.rs loses two empty functions that only kept two imports looking used.
+  Workspace: 843 tests pass, clippy clean.
+
 - One handle rule and one HTML escape in the server (code audit, 4 Nov 2026). The table handle check was written five
   times, byte for byte (aliases, `oracle up`, private rooms, retention, seat rooms); it is now `naming::handle_ok`,
   with the reason the protocol's own rule stays wider (signed history holds a handle starting with `_`). The public

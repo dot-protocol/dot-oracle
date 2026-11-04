@@ -23,12 +23,8 @@ use std::{collections::BTreeMap, convert::Infallible, sync::Arc, time::Duration}
 use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
-pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+/// Re-exported so routes and tests keep `http::now_ms`; the clock itself is `oracle_proto::now_ms`.
+pub use oracle_proto::now_ms;
 
 #[derive(Clone)]
 pub struct App {

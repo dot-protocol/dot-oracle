@@ -764,12 +764,7 @@ pub fn clock(ms: i64) -> String {
     format!("{h:02}:{m:02}")
 }
 
-pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+pub use oracle_proto::now_ms;
 
 /// A deadline relative to now: `due in 3h`, `due 2d late`.
 pub fn due(by_ms: i64) -> String {

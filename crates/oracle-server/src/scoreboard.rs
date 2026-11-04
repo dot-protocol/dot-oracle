@@ -5,10 +5,10 @@
 //! `bm25` (today's `/search`), `aa` (the same run twice: its two tables must agree) and `shuffled` (the gold's truth
 //! rotated to the next question: the negative control). Every framing is a row; an error is a row with its reason.
 use crate::semantic::Semantic;
-use crate::store::{Observation, Result as StoreResult, Store, StoreError};
+use crate::store::{Observation, Result as StoreResult, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 
 pub const ARMS: [&str; 14] = [
@@ -869,8 +869,3 @@ pub fn run(s: &Store, setup: &Setup) -> anyhow::Result<Value> {
 pub fn refused(e: &anyhow::Error) -> bool {
     e.to_string().starts_with("refused:")
 }
-
-#[allow(dead_code)]
-fn _store_error(_: StoreError) {}
-#[allow(dead_code)]
-fn _ids(_: BTreeSet<String>) {}
