@@ -15,8 +15,8 @@ name = "oracle_server"
 path = "src/lib.rs"
 
 [dependencies]
-oracle-proto = { path = "../oracle-proto" }
-oracle-mcp = { path = "../oracle-mcp" }
+oracle-proto = { path = "../oracle-proto", version = "0.1.0" }
+oracle-mcp = { path = "../oracle-mcp", version = "0.1.0" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,3 +38,6 @@ ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

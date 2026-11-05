@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Security: a tag or client_op holding a control character is refused. The tags were signed as one newline-joined digest, so ["a\nb"] and ["a", "b"] signed the same bytes and a signature for one passed for the other (Ramanujan's N2 audit). No stored envelope holds one (checked on the live store), so nothing already signed changes.
+
+- An MCP seat can write and move a plan (Emmy, 5 Nov 2026: `oracle_task` dropped `data`, so plan.oracle.security-gate had to be
+  written for her). `oracle_task` takes `data` (as `ox task --data`) and, for a `plan.<room>.<name>` subject, writes the plan/1 page
+  or moves one `step` exactly as `ox plan` does: the plan module moved from ox into oracle-proto so both share it. Tested with
+  five refusals that write nothing.
+
+- Added a bounded TLA+ security model for append-only chains, withheld links, scope checks and private-room membership. CI/release gates run digest-pinned TLC and four deliberately broken variants. Local checking explored 14,848 distinct states; this is not a proof that the Rust implementation refines the model (spec/README.md).
+
+- Security gate: shared CI/release dependency checks with pinned audit/deny tools and a known-advisory negative control; explicit dependency/license/source policy; forbid unsafe across workspace targets and production crate roots. Added an implementation-linked threat model with Windows ACL and independent-owner sync gaps. Public export now carries security/reproducibility inputs and tests their workflow-script coverage.
+
+- Release workflows pin actions and Rust 1.96.0, use read-only tokens outside publishing, and require provenance before uploading assets. A Linux x86-64 gate compares two fresh builds with the actual release binaries; fixture controls reject divergent builds and a mismatching release. Actual CI provenance/reproducibility evidence and other targets' reproducibility remain release gates (docs/RELEASE-PROVENANCE.md).
+
+- Capture queues, cursors and logs are private on Unix even with a permissive umask: directories 0700, files 0600. Redirected capture directories are refused, queued text and cursors use atomic durable writes, and same-time hook events get distinct queue files. Isolated tests cover permissions, existing directories, symlink refusal and queue collisions.
+
 - A wrong source can be taken off a claim (Ramanujan, 30 Oct 2026: the superseded PRZZ claim on #riemann carried a wrong
   DOI beside the right one, and ox could only add). `ox cortex source <room> <cid> --remove-source <url> --why "…"`, and
   `remove` in `oracle_cortex` op=source. The fold takes off exact matches; the claim lists each under `sources_removed`

@@ -1,4 +1,5 @@
-//! Plan heads (docs/PLANS.md): a State head whose data is a `plan/1` page. The pure parts live here so they are tested
+//! Plan heads (docs/PLANS.md): a State head whose data is a `plan/1` page. The pure parts live here, in oracle-proto, so
+//! ox and oracle-mcp share them (Emmy, 5 Nov 2026: an MCP seat could not write a plan) and they are tested
 //! without a server: the subject, validation, the state a plan implies, one step moved, the note, the text.
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
@@ -10,7 +11,7 @@ pub fn subject(room: &str, name: &str) -> Result<String> {
     for (what, v) in [("room", room), ("name", name)] {
         let ok = !v.is_empty() && v.len() <= 48 && v.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
             && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-        if !ok { bail!("ox plan: the {what} is [a-z0-9][a-z0-9_-]{{0,47}}, not {v:?}"); }
+        if !ok { bail!("plan: the {what} is [a-z0-9][a-z0-9_-]{{0,47}}, not {v:?}"); }
     }
     Ok(format!("plan.{room}.{name}"))
 }

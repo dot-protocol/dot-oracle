@@ -77,14 +77,37 @@ pub fn safe(id: &str) -> String {
     if s.is_empty() { "session".into() } else { s }
 }
 
-/// Put one capture in the spool (`<home>/capture/queue/<ms>-<session>.json`) and return its path.
+/// Capture may hold private transcript text before redaction. Restrict its directories
+/// independently of the caller's umask or the enclosing ox home's permissions.
+pub fn private_dir(home: &Path, child: Option<&str>) -> Result<PathBuf> {
+    let root = home.join("capture");
+    for path in std::iter::once(root.clone()).chain(child.map(|c| root.join(c))) {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            bail!("capture directory must be a real directory: {}", path.display());
+        }
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(child.map_or(root.clone(), |c| root.join(c)))
+}
+
+/// Put one capture in the spool (`<home>/capture/queue/<ms>-<session>-<nonce>.json`) and return its path.
 pub fn spool(home: &Path, s: &Spooled, now_ms: i64) -> Result<PathBuf> {
-    let dir = home.join("capture").join("queue");
-    std::fs::create_dir_all(&dir)?;
-    let file = dir.join(format!("{now_ms}-{}.json", safe(&s.session)));
+    let dir = private_dir(home, Some("queue"))?;
+    let file = dir.join(format!("{now_ms}-{}-{}.json", safe(&s.session), oracle_proto::random_hex(8)));
     let v = json!({"agent": s.agent, "session": s.session, "transcript": s.transcript, "event": s.event,
         "last_message": s.last_message, "at": now_ms});
-    std::fs::write(&file, serde_json::to_string(&v)?)?;
+    crate::write_durable(&file, &serde_json::to_string(&v)?)?;
     Ok(file)
 }
 
@@ -108,9 +131,8 @@ pub fn done_lines(home: &Path, session: &str) -> usize {
 }
 
 pub fn set_done_lines(home: &Path, session: &str, lines: usize, now_ms: i64) -> Result<()> {
-    let dir = home.join("capture").join("sessions");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(format!("{}.json", safe(session))), json!({"lines": lines, "at": now_ms}).to_string())?;
+    let dir = private_dir(home, Some("sessions"))?;
+    crate::write_durable(&dir.join(format!("{}.json", safe(session))), &json!({"lines": lines, "at": now_ms}).to_string())?;
     Ok(())
 }
 
@@ -172,6 +194,44 @@ pub fn new_text(transcript: &str, done: usize) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captures_at_the_same_time_keep_separate_private_files() {
+        let home = std::env::temp_dir().join(format!("ox-capture-private-{}", oracle_proto::random_hex(8)));
+        let s = from_hook("codex", r#"{"session_id":"private-session","last_assistant_message":"private fixture text"}"#).unwrap();
+        let first = spool(&home, &s, 7).unwrap();
+        let second = spool(&home, &s, 7).unwrap();
+        assert_ne!(first, second, "simultaneous hook events must not overwrite each other");
+        set_done_lines(&home, &s.session, 3, 7).unwrap();
+        crate::capture_log(&home, "private diagnostic");
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in ["capture", "capture/queue", "capture/sessions"] {
+                assert_eq!(std::fs::metadata(home.join(dir)).unwrap().permissions().mode() & 0o777, 0o700, "{dir}");
+            }
+            for file in [first.clone(), second, home.join("capture/sessions/private-session.json"), home.join("capture/log")] {
+                assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600, "{file:?}");
+            }
+            // Previously created capture directories are tightened too.
+            std::fs::set_permissions(home.join("capture"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            private_dir(&home, None).unwrap();
+            assert_eq!(std::fs::metadata(home.join("capture")).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        assert!(std::fs::read_to_string(first).unwrap().contains("private fixture text"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_refuses_a_redirected_directory() {
+        let home = std::env::temp_dir().join(format!("ox-capture-link-{}", oracle_proto::random_hex(8)));
+        std::fs::create_dir_all(home.join("outside")).unwrap();
+        std::os::unix::fs::symlink(home.join("outside"), home.join("capture")).unwrap();
+        let s = from_hook("codex", r#"{"session_id":"s","last_assistant_message":"private fixture"}"#).unwrap();
+        assert!(spool(&home, &s, 1).is_err());
+        assert_eq!(std::fs::read_dir(home.join("outside")).unwrap().count(), 0);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn each_agent_s_hook_is_read() {

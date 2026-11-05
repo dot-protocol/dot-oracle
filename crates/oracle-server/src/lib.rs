@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Oracle server library: the store (all data rules) and the HTTP layer over it.
 pub mod alias;
 pub mod answerable;

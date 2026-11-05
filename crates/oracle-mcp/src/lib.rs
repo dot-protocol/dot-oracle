@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! The Oracle's MCP tools, written once and served through two doors.
 //!
 //! `ox mcp` serves them over stdio on the agent's own machine, signing every write with the
@@ -308,6 +310,8 @@ pub fn tools(legacy: bool) -> Value {
         tool("oracle_task", "Write a state head for work I own. open and running need next (a date), or the head rots. blocked needs needs, blocks, check and a next within 3 days: a blocker is re-checked, never left to sit.",
              json!({"owner": s("with no subject: whose heads to list, a handle or * (was oracle_tasks)"), "exp": {"type": "boolean", "description": "with no subject: the experiment registry, newest first (was oracle_experiments)"}, "track": s("with exp: e.g. qsb, fhe, oracle-memory"), "stage": s("with exp: e.g. proposed, running, measured, killed"), "q": s("with exp: words that must all appear"), "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "with no subject: at most this many heads, newest-touched first (default 50; budget says what was cut); with exp: rows"},
                     "offset": {"type": "integer", "minimum": 0, "description": "with no subject: skip this many heads, the next page (budget.more names it)"}, "subject": s("stable id of the work"), "state": {"type": "string", "enum": ["noted", "open", "running", "blocked", "done"]},
+                    "data": {"description": "machine state carried with the head, as `ox task --data`: a JSON object (or its text). For a plan (subject plan.<room>.<name>) it is the whole plan/1 page; it is checked, the head goes to the plan's room, and the state follows the steps (docs/PLANS.md)"},
+                    "step": s("a plan only: move one step, e.g. S2=done; the rest of the newest page is kept (as `ox plan … --step`)"),
                     "note": s("one line a person reads"), "next": s("next-touch date, e.g. 2026-10-01"), "needs": {"type": "array", "items": {"type": "string"}, "description": "blocked only: who or what must act (a handle, a subject, an obs id)"}, "blocks": s("blocked only: the one step that cannot proceed; everything else continues"), "check": s("blocked only: how anyone can verify the blocker still holds"), "room": s("default: board"), "op_id": s("a write happens once per op_id: you may choose it (8-64 of A-Za-z0-9_-), reuse the same one to retry a write whose outcome was unknown (it is then never applied twice), and an op_id already used for a different write is refused")}),
              &[], false),
         tool("oracle_room_state", "A room's signed State: purpose, goal, current, scope, constraints, questions, next, acceptance, continued_in, continued_from (a public room also about, question, why, outcomes, latest, plan, take_part: what a stranger reads first, docs/PUBLIC-STATE.md; latest_at is stamped when latest changes) (a seat's room also kind, boot, tools, rooms, rules). Without set it reads; with set it writes one revision that keeps every field not named. Pass head (from a read) to refuse the write if someone changed the State since. Pass adopts (a proposal id) to record that a decider accepted that proposal as this revision's authority: refused unless the server shows it settled as accepted by a decider of the room. Pass as_of (a seq) to read the State as it stood below that cursor (read only).",
@@ -543,7 +547,7 @@ fn verb_route_in(door: &dyn Door, name: &str, a: &Value, allowed: &[&str]) -> Re
                     ("oracle_remember", v)
                 }
                 "task" => {
-                    let mut v = pick(&[("subject", "subject"), ("state", "state"), ("text", "note"), ("next", "next"), ("needs", "needs"), ("blocks", "blocks"), ("check", "check"), ("op_id", "op_id")]);
+                    let mut v = pick(&[("subject", "subject"), ("state", "state"), ("text", "note"), ("next", "next"), ("needs", "needs"), ("blocks", "blocks"), ("check", "check"), ("data", "data"), ("step", "step"), ("op_id", "op_id")]);
                     if let Some(r) = place.clone().filter(|r| r != "me") {
                         v["room"] = json!(r);
                     }
@@ -628,6 +632,64 @@ pub fn fold_tool(name: &str, a: &Value) -> Option<(String, Value, String)> {
 }
 
 /// A write's caller-chosen operation id: the same value on a retry makes it the same write (one event).
+/// `data` as `ox task --data` takes it: a JSON object, or its text (Emmy, 5 Nov 2026: oracle_task dropped it, so an MCP
+/// seat could not carry a head's machine state or write a plan).
+fn data_of(a: &Value) -> Result<Option<Value>> {
+    match &a["data"] {
+        Value::Null => Ok(None),
+        Value::String(t) => Ok(Some(serde_json::from_str(t).map_err(|e| anyhow!("data is not JSON: {e}"))?)),
+        v @ Value::Object(_) => Ok(Some(v.clone())),
+        _ => anyhow::bail!("data is a JSON object, or its text"),
+    }
+}
+
+/// A plan head written as `ox plan` writes it (docs/PLANS.md; oracle_proto::plan is shared): the whole plan/1 page from
+/// `data`, or one step moved on the newest page with `step`. The page is checked, the head goes to the plan's own room
+/// with the schema:plan/1 tag, its state follows the steps (a `state` that disagrees is refused, never silently
+/// replaced), and an open or running plan needs a next-touch date, given or kept from the last revision.
+fn plan_write(door: &dyn Door, a: &Value) -> Result<String> {
+    use oracle_proto::plan;
+    let subject = text_of(a, "subject")?;
+    let mut parts = subject.splitn(3, '.');
+    let (room, name) = match (parts.next(), parts.next(), parts.next()) {
+        (Some("plan"), Some(r), Some(n)) => (r.to_string(), n.to_string()),
+        _ => anyhow::bail!("a plan subject is plan.<room>.<name>, not {subject:?}"),
+    };
+    if plan::subject(&room, &name)? != subject {
+        anyhow::bail!("a plan subject is plan.<room>.<name>, not {subject:?}");
+    }
+    let current = || -> Result<Option<Value>> {
+        Ok(plan::newest_cargo(&door.get(&format!("/search?tag={}&limit=200", enc(&format!("subject:{subject}"))))?))
+    };
+    let (page, prev_next) = match (data_of(a)?, a["step"].as_str()) {
+        (Some(_), Some(_)) => anyhow::bail!("data or step, not both"),
+        (Some(page), None) => {
+            plan::validate(&page)?;
+            (page, current()?.and_then(|c| c["next_touch"].as_str().map(str::to_string)))
+        }
+        (None, Some(mv)) => {
+            let Some(cur) = current()? else { anyhow::bail!("{subject}: no plan on record yet; write one with data (a plan/1 page)") };
+            (plan::step(&cur["data"], mv)?, cur["next_touch"].as_str().map(str::to_string))
+        }
+        (None, None) => anyhow::bail!("a plan is written with data (a plan/1 page) or moved with step (e.g. S2=done)"),
+    };
+    let state = plan::state(&page);
+    if let Some(asked) = a["state"].as_str().filter(|s| *s != state) {
+        anyhow::bail!("a plan's state follows its steps: these steps make it {state}, not {asked}");
+    }
+    let mut cargo = json!({"subject": subject, "state": state, "owner": door.handle(), "data": page});
+    match a["next"].as_str().map(str::to_string).or(prev_next) {
+        Some(n) => cargo["next_touch"] = json!(n),
+        None if matches!(state, "open" | "running") => anyhow::bail!("an {state} plan needs next (a date), or the head rots"),
+        None => {}
+    }
+    let note = a["note"].as_str().filter(|n| !n.trim().is_empty()).map(str::to_string).unwrap_or_else(|| plan::note(&cargo["data"]));
+    Ok(receipt(
+        door.write(Kind::State, &room, &note, Some(cargo.to_string()), vec![format!("subject:{subject}"), "schema:plan/1".into()], op_of(a))?,
+        &format!("{subject} → {state}"),
+    ))
+}
+
 fn op_of(args: &Value) -> Option<String> {
     args["op_id"].as_str().map(str::to_owned)
 }
@@ -4422,9 +4484,16 @@ pub fn call(door: &dyn Door, name: &str, a: &Value) -> Result<String> {
                 &format!("remembered, {kind}"),
             )
         }
+        "oracle_task" if a["subject"].as_str().is_some_and(|s| s.starts_with("plan.")) => plan_write(door, a)?,
         "oracle_task" => {
             let (subject, state) = (text_of(a, "subject")?, text_of(a, "state")?);
+            if a.get("step").is_some_and(|v| !v.is_null()) {
+                anyhow::bail!("step moves a plan's step; {subject} is not a plan (plan.<room>.<name>)");
+            }
             let mut cargo = json!({"subject": subject, "state": state, "owner": door.handle()});
+            if let Some(d) = data_of(a)? {
+                cargo["data"] = d;
+            }
             if let Some(n) = a["next"].as_str() {
                 cargo["next_touch"] = json!(n);
             }
@@ -4730,6 +4799,52 @@ mod tests {
         fn recorded_write(&self, op_id: &str) -> Result<Option<Value>> {
             Ok(self.answers.get(format!("recorded:{op_id}")).cloned())
         }
+    }
+
+    /// An MCP seat writes and moves a plan exactly as `ox plan` does (Emmy, 5 Nov 2026: oracle_task dropped `data`, so she
+    /// could not write plan.oracle.security-gate from her seat). Negative controls: a malformed page, a state that the
+    /// steps contradict, data and step together, a step on a head that is not a plan, and a plan with no next date.
+    #[test]
+    fn an_mcp_seat_writes_and_moves_a_plan_as_ox_plan_does() {
+        let page = json!({"schema": "plan/1", "title": "Gate", "problems": [{"id": "P1", "title": "unsafe"}],
+            "steps": [{"id": "S1", "title": "patch", "status": "done", "fixes": ["P1"]}, {"id": "S2", "title": "deny", "status": "doing", "fixes": ["P1"]}]});
+        let f = Fake::new(json!({}));
+        let out = call(&f, "oracle_task", &json!({"subject": "plan.oracle.gate", "data": page, "next": "2026-11-06"})).unwrap();
+        assert!(out.contains("plan.oracle.gate → running"), "{out}");
+        {
+            let w = f.writes.borrow();
+            let (kind, room, _text, cargo, tags) = &w[0];
+            assert_eq!((kind.as_str(), room.as_str()), ("state", "oracle"), "a plan goes to its own room, never the board");
+            assert!(tags.contains(&"schema:plan/1".to_string()) && tags.contains(&"subject:plan.oracle.gate".to_string()));
+            let c: Value = serde_json::from_str(cargo.as_ref().unwrap()).unwrap();
+            assert_eq!(c["data"], page, "the page is carried whole");
+            assert_eq!((c["state"].as_str(), c["next_touch"].as_str(), c["owner"].as_str()), (Some("running"), Some("2026-11-06"), Some("rocky")));
+        }
+        // the same page as text is the same write
+        call(&f, "oracle_task", &json!({"subject": "plan.oracle.gate", "data": page.to_string(), "next": "2026-11-06"})).unwrap();
+        // a step moved on the newest page keeps the rest and the last next date
+        let hit = json!({"kind": "state", "created_ms": 5, "cargo": json!({"subject": "plan.oracle.gate", "state": "running", "next_touch": "2026-11-07", "data": page}).to_string()});
+        let g = Fake::new(json!({"/search": {"items": [hit]}}));
+        let out = call(&g, "oracle_task", &json!({"subject": "plan.oracle.gate", "step": "S2=done"})).unwrap();
+        assert!(out.contains("→ done"), "{out}");
+        let c: Value = serde_json::from_str(g.writes.borrow()[0].3.as_ref().unwrap()).unwrap();
+        assert_eq!(c["data"]["steps"][1]["status"], "done");
+        assert_eq!(c["data"]["steps"][0]["title"], "patch");
+        assert_eq!(c["next_touch"], "2026-11-07");
+        // controls: nothing is written for any of these
+        let h = Fake::new(json!({}));
+        let bad = json!({"schema": "plan/1", "title": "x", "problems": [], "steps": [{"id": "S1", "title": "t", "status": "done", "fixes": ["P9"]}]});
+        assert!(call(&h, "oracle_task", &json!({"subject": "plan.oracle.gate", "data": bad, "next": "2026-11-06"})).is_err(), "a step fixing an unknown problem");
+        assert!(call(&h, "oracle_task", &json!({"subject": "plan.oracle.gate", "data": page, "state": "done", "next": "2026-11-06"})).unwrap_err().to_string().contains("follows its steps"));
+        assert!(call(&h, "oracle_task", &json!({"subject": "plan.oracle.gate", "data": page, "step": "S2=done"})).is_err());
+        assert!(call(&h, "oracle_task", &json!({"subject": "plan.oracle.gate", "data": page})).unwrap_err().to_string().contains("needs next"));
+        assert!(call(&h, "oracle_task", &json!({"subject": "budgets", "state": "noted", "note": "x", "step": "S1=done"})).is_err());
+        assert!(call(&h, "oracle_task", &json!({"subject": "plan.Oracle.gate", "data": page, "next": "2026-11-06"})).is_err(), "a malformed subject");
+        assert!(h.writes.borrow().is_empty(), "no control wrote anything");
+        // any other head now carries its data, as ox task --data does
+        call(&h, "oracle_task", &json!({"subject": "feed.book", "state": "noted", "note": "book", "data": {"equity": 1}})).unwrap();
+        let c: Value = serde_json::from_str(h.writes.borrow()[0].3.as_ref().unwrap()).unwrap();
+        assert_eq!(c["data"]["equity"], 1);
     }
 
     /// A seat scoped to its rooms (Dot, 4 Nov 2026) gets its inbox from its rooms; an addressed task stays listed until

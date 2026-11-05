@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! ox — the Oracle CLI.
 //!
 //! One rule above the rest: ox never reports success for a write the server did not
@@ -19,7 +21,7 @@ mod authority;
 mod board;
 mod capture;
 mod edit;
-mod plan;
+use oracle_proto::plan;
 mod close;
 mod doorbell;
 mod eval;
@@ -5395,8 +5397,8 @@ fn capture_spool(ox: &Ox, agent: &str) -> Result<()> {
 /// Every spooled capture, one drain at a time. A capture that fails is logged and dropped from the spool; the session's next
 /// capture reads from the same line, so nothing it said is skipped.
 fn capture_drain(ox: &Ox, room: &str) -> Result<()> {
+    capture::private_dir(&ox.home, Some("queue"))?;
     let dir = ox.home.join("capture");
-    std::fs::create_dir_all(dir.join("queue"))?;
     let lock = dir.join("drain.lock");
     // A lock older than twenty minutes was left by a drain that died.
     if std::fs::metadata(&lock).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(1200)) {
@@ -5496,12 +5498,22 @@ fn capture_known(ox: &Ox, room: &str, text: &str) -> Result<bool> {
 /// One line in `<home>/capture/log`; the log is started again past a megabyte.
 fn capture_log(home: &Path, line: &str) {
     use std::io::Write;
-    let file = home.join("capture").join("log");
-    let _ = std::fs::create_dir_all(home.join("capture"));
+    let Ok(dir) = capture::private_dir(home, None) else { return };
+    let file = dir.join("log");
     if std::fs::metadata(&file).is_ok_and(|m| m.len() > 1 << 20) {
         let _ = std::fs::remove_file(&file);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut f) = options.open(&file) {
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            if f.set_permissions(std::fs::Permissions::from_mode(0o600)).is_err() { return; }
+        }
         let _ = writeln!(f, "{} {line}", oracle_proto::iso_ms(now_ms()));
     }
 }

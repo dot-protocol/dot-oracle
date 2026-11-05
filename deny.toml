@@ -1,0 +1,28 @@
+# Dependency changes must remain within this reviewed policy. No advisory exemptions.
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+git-fetch-with-cli = true
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "ISC", "BSD-3-Clause", "Unicode-3.0", "Zlib", "CDLA-Permissive-2.0"]
+confidence-threshold = 0.95
+include-dev = true
+
+[bans]
+# Existing transitive major versions coexist; report rather than hide them.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+  # Keep outbound TLS on the reviewed rustls stack.
+  { name = "openssl" },
+  { name = "openssl-sys" },
+  { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

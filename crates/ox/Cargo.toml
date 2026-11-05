@@ -7,8 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-oracle-proto = { path = "../oracle-proto" }
-oracle-mcp = { path = "../oracle-mcp" }
+oracle-proto = { path = "../oracle-proto", version = "0.1.0" }
+oracle-mcp = { path = "../oracle-mcp", version = "0.1.0" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,6 +18,9 @@ clap = { version = "4", features = ["derive", "env"] }
 ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
-oracle-server = { path = "../oracle-server" }
+oracle-server = { path = "../oracle-server", version = "0.1.0" }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+
+[lints]
+workspace = true

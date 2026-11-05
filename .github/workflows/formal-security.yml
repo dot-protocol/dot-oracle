@@ -1,0 +1,20 @@
+name: formal-security
+on:
+  workflow_call:
+permissions: { contents: read }
+jobs:
+  model:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with: { distribution: temurin, java-version: "21.0.13+9" }
+      - run: python3 scripts/check-formal-model.py
+        env: { ORACLE_FORMAL_OUTPUT: "${{ runner.temp }}/formal-evidence" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: formal-model-evidence
+          path: ${{ runner.temp }}/formal-evidence/*.log
+          if-no-files-found: error

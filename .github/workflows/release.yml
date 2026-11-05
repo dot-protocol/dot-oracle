@@ -9,30 +9,41 @@ on:
     tags: ["v*"]
     # A change to how dotOracle installs is proved on every platform the moment it lands (nothing publishes from a branch).
     branches: [dev]
-    paths: [".github/workflows/release.yml", "scripts/install.sh", "scripts/install.ps1", "scripts/smoke-install.sh", "scripts/no-phone-home.sh", "scripts/smoke-install.ps1", "scripts/installer-edges.sh", "scripts/installer-edges.ps1"]
+    paths: [".github/workflows/release.yml", ".github/workflows/formal-security.yml", "spec/**", "scripts/check-formal-model.py", ".github/workflows/dependency-security.yml", "deny.toml", "scripts/check-dependency-security.py", "scripts/repro-build.sh", "scripts/test-repro-build.py", "scripts/install.sh", "scripts/install.ps1", "scripts/smoke-install.sh", "scripts/no-phone-home.sh", "scripts/smoke-install.ps1", "scripts/installer-edges.sh", "scripts/installer-edges.ps1"]
   workflow_dispatch:
-permissions: { contents: write }
+permissions: { contents: read }
+env:
+  RUST_TOOLCHAIN: "1.96.0"
 jobs:
+  formal:
+    uses: ./.github/workflows/formal-security.yml
+  security:
+    uses: ./.github/workflows/dependency-security.yml
   build:
     strategy:
       matrix:
         include:
           - { os: macos-latest,     target: aarch64-apple-darwin }
           - { os: macos-15-intel,   target: x86_64-apple-darwin }
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04,     target: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
-    env: { ORACLE_BUILD_COMMIT: "${{ github.sha }}" }
+    env:
+      ORACLE_BUILD_COMMIT: "${{ github.sha }}"
+      RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/oracle/source"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "${{ matrix.target }}" }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with: { toolchain: "${{ env.RUST_TOOLCHAIN }}", targets: "${{ matrix.target }}" }
       - if: contains(matrix.target, 'linux')
         run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - name: build
         shell: bash
-        run: cargo build --release --locked --target ${{ matrix.target }} -p oracle-server -p ox
+        run: |
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+          cargo build --release --locked --target ${{ matrix.target }} -p oracle-server -p ox
       - name: package (unix)
         if: "!contains(matrix.target, 'windows')"
         shell: bash
@@ -48,7 +59,7 @@ jobs:
           Compress-Archive -Path target/${{ matrix.target }}/release/oracle.exe, target/${{ matrix.target }}/release/ox.exe -DestinationPath dist/oracle-${{ matrix.target }}.zip
           $h = (Get-FileHash dist/oracle-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower()
           "$h  oracle-${{ matrix.target }}.zip" | Out-File -Encoding ascii -NoNewline dist/oracle-${{ matrix.target }}.zip.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: "oracle-${{ matrix.target }}", path: dist/* }
 
   smoke:
@@ -59,9 +70,10 @@ jobs:
         os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { path: dist, merge-multiple: true }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: "oracle-*", path: dist, merge-multiple: true }
       - name: the README install and first minute (macOS, Linux)
         if: runner.os != 'Windows'
         shell: bash
@@ -111,16 +123,49 @@ jobs:
           try { ./scripts/installer-edges.ps1 dist } catch { $failed = $true; Write-Host "control failed as it must: $_" }
           if (-not $failed) { throw 'the negative control passed, so the test cannot see an install it should have refused' }
 
+  reproducible:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - run: python3 scripts/test-repro-build.py
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with: { toolchain: "${{ env.RUST_TOOLCHAIN }}", targets: x86_64-unknown-linux-musl }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: oracle-x86_64-unknown-linux-musl, path: "${{ runner.temp }}/repro-release" }
+      - name: two fresh source paths and target directories
+        run: |
+          tar -xzf "$RUNNER_TEMP/repro-release/oracle-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP/repro-release"
+          REPRO_OUTPUT="$RUNNER_TEMP/repro-evidence" REPRO_REFERENCE="$RUNNER_TEMP/repro-release" bash scripts/repro-build.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: reproducibility-evidence
+          path: |
+            ${{ runner.temp }}/repro-evidence/*.txt
+            ${{ runner.temp }}/repro-evidence/*.sha256
+          if-no-files-found: error
+
   publish:
-    needs: smoke
+    # Only this job can publish or request an attestation signing certificate.
+    permissions: { contents: write, id-token: write, attestations: write }
+    needs: [smoke, reproducible, security, formal]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { path: dist, merge-multiple: true }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: "oracle-*", path: dist, merge-multiple: true }
       - run: cp scripts/install.sh scripts/install.ps1 dist/
-      - uses: softprops/action-gh-release@v2
+      - name: attest the exact release files before publishing
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+          create-storage-record: false
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with: { files: "dist/*" }
 
   public:
@@ -131,7 +176,8 @@ jobs:
         os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
       - name: the one line from the README, from the public release (macOS, Linux)
         if: runner.os != 'Windows'
         shell: bash

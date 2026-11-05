@@ -524,3 +524,26 @@ The route uses the bounded heavy-work executor because deriving asks can scan hi
 The release installer requires a valid SHA-256 checksum download and matching archive
 before installing either binary. Missing, malformed or mismatching checksums fail closed.
 This verifies integrity against the release's checksum; it is not a publisher signature.
+
+Capture confidentiality starts before extraction: hook fallback text is private
+local data. Unix capture directories are 0700 and capture files are 0600 regardless
+of umask; directory symlinks are refused. Spool/cursor writes are atomic and durable,
+and simultaneous events do not replace each other's queue files. This protects
+local storage, not consent to send a transcript to a configured extraction service.
+
+Release provenance binds each distributed file's digest to the publishing workflow.
+Only the publishing job receives write/signing permissions, and publication waits
+for platform smoke tests and the Linux x86-64 reproducibility comparison against
+the actual release binaries. A valid attestation does not prove correctness or
+reproducibility of other targets (docs/RELEASE-PROVENANCE.md).
+
+Oracle source forbids unsafe code through crate attributes and inherited workspace
+lints; this is not a prohibition on unsafe code inside dependencies. CI and release
+publication share the dependency security gate, including known-advisory negative
+controls. The threat boundaries, tested mitigations and unverified gaps are recorded
+in docs/THREAT-MODEL.md; no model or signed receipt substitutes for runtime evidence.
+
+The finite security transition model and its counterexample controls live under
+spec/. It checks the intended authorization intersection and chain projection,
+not cryptographic primitives or refinement of Rust routes. Release publication
+requires the model-checking job as well as runtime and dependency checks.

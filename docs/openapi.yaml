@@ -257,7 +257,7 @@ paths:
   /extract:
     post:
       tags: [write]
-      summary: 'extract/1: the decisions, lessons, preferences and commitments in a session''s text, by the local model this server names (ORACLE_EXTRACT_URL, ORACLE_EXTRACT_MODEL; docs/CAPTURE.md). Stores nothing: the seat signs what it keeps (ox capture). A line the secret scan matches never reaches the model. Write scope.'
+      summary: 'extract/1: the decisions, lessons, preferences and commitments in a session''s text, by the configured model endpoint this server names; locality is not enforced (ORACLE_EXTRACT_URL, ORACLE_EXTRACT_MODEL; docs/CAPTURE.md). Stores nothing: the seat signs what it keeps (ox capture). A line the secret scan matches never reaches the model. Write scope.'
       requestBody: { content: { application/json: { schema: { type: object, required: [text], properties: { text: { type: string, description: 'the newest 24,000 characters are read' } } } } } }
       responses: { '200': { description: 'schema extract/1: model, memories [{kind, text, why}], dropped_lines, input_chars, ms' }, '401': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
   /reflect:

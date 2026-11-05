@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! `oracle` — run and administer an Oracle.
 //!
 //!   oracle init  --owner blaze        create the database, the owner key and its token

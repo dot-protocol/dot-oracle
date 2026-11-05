@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! The Oracle wire contract.
 //!
 //! This crate is the only place signing and verification are implemented. The server and
@@ -11,6 +13,8 @@ use sha2::{Digest, Sha256};
 pub mod keyfile;
 pub mod microdot;
 pub mod offline;
+/// Plan heads (docs/PLANS.md): shared by ox and oracle-mcp, so an MCP seat writes a plan exactly as `ox plan` does.
+pub mod plan;
 
 /// Accepted clock skew between a client and the server, and the replay window for nonces.
 pub const MAX_SKEW_MS: i64 = 5 * 60 * 1000;
@@ -226,10 +230,16 @@ impl Envelope {
         if self.nonce.len() < 32 || hex::decode(&self.nonce).is_err() {
             return Err(ProtoError::Invalid("nonce"));
         }
-        if self.client_op.is_empty() || self.client_op.len() > 128 {
+        // client_op is signed as a raw line and the tags are signed as one newline-joined digest, so a control
+        // character in either would let two different envelopes sign the same bytes: ["a\nb"] and ["a", "b"] hashed
+        // alike (Ramanujan's N2 audit of 23de599). Refusing them keeps
+        // signing_bytes injective without changing a byte of any envelope already stored (none holds one).
+        if self.client_op.is_empty() || self.client_op.len() > 128 || self.client_op.chars().any(char::is_control) {
             return Err(ProtoError::Invalid("client_op"));
         }
-        if self.tags.len() > 32 || self.tags.iter().any(|t| t.is_empty() || t.len() > 200) {
+        if self.tags.len() > 32
+            || self.tags.iter().any(|t| t.is_empty() || t.len() > 200 || t.chars().any(char::is_control))
+        {
             return Err(ProtoError::Invalid("tags"));
         }
         if self.authored_ms.is_some_and(|a| a > self.ts_ms + MAX_SKEW_MS || a < self.ts_ms - MAX_AUTHORED_AGE_MS) {
@@ -666,6 +676,31 @@ mod tests {
         let mut e = env("hi");
         e.content = String::new();
         assert_eq!(e.validate(), Err(ProtoError::Invalid("content")));
+    }
+
+    #[test]
+    fn a_tag_or_client_op_with_a_control_character_is_refused_so_signing_bytes_stay_injective() {
+        // The mutant from Ramanujan's N2 audit: one tag holding a newline signs exactly what two tags sign.
+        let two = Envelope::sign(&key(), "room", "rocky", Kind::Say, "hi", None, vec!["a".into(), "b".into()], NOW);
+        let mut one = two.clone();
+        one.tags = vec!["a\nb".into()];
+        assert_eq!(one.signing_bytes(), two.signing_bytes(), "the framing alone cannot tell them apart");
+        assert_eq!(one.validate(), Err(ProtoError::Invalid("tags")));
+        assert!(one.verify_stored(&hex::encode(key().verifying_key().to_bytes())).is_err(), "nor can it pass as stored");
+        assert_eq!(two.validate(), Ok(()));
+        for bad in ["a\rb", "a\tb", "a\u{0}b", "a\u{7f}b", "a\u{85}b"] {
+            let mut e = two.clone();
+            e.tags = vec![bad.into()];
+            assert_eq!(e.validate(), Err(ProtoError::Invalid("tags")), "{bad:?}");
+        }
+        // Negative control: a plain tag that merely differs is accepted and signs different bytes.
+        let mut ab = two.clone();
+        ab.tags = vec!["ab".into()];
+        assert_eq!(ab.validate(), Ok(()));
+        assert_ne!(ab.signing_bytes(), two.signing_bytes());
+        let mut op = env("hi");
+        op.client_op = "op\n0".into();
+        assert_eq!(op.validate(), Err(ProtoError::Invalid("client_op")));
     }
 
     #[test]

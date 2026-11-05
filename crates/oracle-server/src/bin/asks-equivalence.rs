@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! asks-equivalence — the batched asks view against the per-root reference on a REAL store, read only, at one
 //! fixed now_ms: every seat × {all, open, done} without a room, and the named seats × every room × {all, open,
 //! done}. Per case the two walks run alternately, warm (reference, batched, reference, batched); the complete

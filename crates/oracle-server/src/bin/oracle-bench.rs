@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! oracle-bench — load a realistic corpus with REAL signed writes, then measure every
 //! read path. Reproducible: `cargo run --release --bin oracle-bench -- --n 200000`.
 

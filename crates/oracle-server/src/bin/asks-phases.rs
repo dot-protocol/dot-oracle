@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! asks-phases — where the asks view's time goes, phase by phase, per walk, on a REAL store (a disposable copy,
 //! never the live store), read only, at one fixed now_ms. Cases: the named seats × {all, open, done} without a
 //! room, and the named seats × the named rooms × {all, open, done}. Per case both walks run once to warm the page

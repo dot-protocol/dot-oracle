@@ -4,8 +4,9 @@
 //! sentence that stands alone. It stores nothing: the seat that sent the text signs what it keeps (`ox capture`), so a
 //! memory is never written in a seat's name by the server.
 //!
-//! The model is local (`ORACLE_EXTRACT_URL`, an Ollama-compatible `/api/chat`; `ORACLE_EXTRACT_MODEL`, default qwen3:8b):
-//! the text never leaves the machine Oracle runs on. A line the secret scan matches is dropped before the model reads it.
+//! The model endpoint is configured (`ORACLE_EXTRACT_URL`, an Ollama-compatible `/api/chat`;
+//! `ORACLE_EXTRACT_MODEL`, default qwen3:8b). Locality is not enforced. Text reaches Oracle before filtering;
+//! a line the secret scan matches is dropped before the model reads it.
 //! One extraction runs at a time; a CPU model is slow and the store must stay quick.
 
 use serde_json::{json, Value};
