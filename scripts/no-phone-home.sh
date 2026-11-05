@@ -10,7 +10,9 @@ bin="${ORACLE_BIN_DIR:-$(dirname "$(command -v ox)")}"
 if [ "${NO_PHONE_HOME_INNER:-}" != 1 ]; then
   command -v strace >/dev/null || { echo "no-phone-home: needs strace" >&2; exit 2; }
   work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-  if unshare -rn true 2>/dev/null; then ns="unshare -rn"; else ns="unshare -n"; fi
+  # Root needs only a network namespace. A user namespace would map root to nobody over files it does not own, and
+  # the binaries usually sit in the installing user's private 0700 home (sudo in CI: 'oracle: Permission denied').
+  if [ "$(id -u)" = 0 ]; then ns="unshare -n"; elif unshare -rn true 2>/dev/null; then ns="unshare -rn"; else ns="unshare -n"; fi
   NO_PHONE_HOME_INNER=1 WORK="$work" ORACLE_BIN_DIR="$bin" $ns sh -c \
     'ip link set lo up && exec strace -f -qq -e trace=connect -o "$WORK/trace" sh "$0"' "$0" > "$work/run.log" 2>&1 || {
     echo "no-phone-home: the first minute failed inside the sandbox" >&2; cat "$work/run.log" >&2; exit 1; }
