@@ -5,7 +5,10 @@ competitors install into the agent and extract memories on write. Before this, o
 
 ## What happens
 
-1. `oracle up` adds three hooks to every agent it finds, in that agent's own file and shape. Hooks already in the file
+0. **Capture is off until you turn it on** (Blaze, 5 Nov 2026: 'Capture off until explicitly enabled'). `oracle up` only
+   adds the start hook, so an agent wakes with the brief; `oracle up --capture` (or `oracle up --agents-only --capture` later)
+   adds the two capture hooks below. Nothing is read from a session until then.
+1. `oracle up --capture` adds three hooks to every agent it finds, in that agent's own file and shape. Hooks already in the file
    are kept, and a second run adds nothing.
 
    | agent | file | wakes with the brief | captured on |

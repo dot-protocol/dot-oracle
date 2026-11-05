@@ -80,6 +80,9 @@ enum Cmd {
         /// Only connect the agents, to the seat a previous `oracle up` made (the retry after a failed agent step).
         #[arg(long)]
         agents_only: bool,
+        /// Also capture sessions into memories: hooks on compact and on end (docs/CAPTURE.md). Off unless you ask.
+        #[arg(long)]
+        capture: bool,
     },
     /// Serve the HTTP API.
     Serve {
@@ -447,10 +450,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
     // Before the store is opened: `oracle up` plans from a read-only look and creates the home only after a yes (src/up.rs).
-    if let Cmd::Up { owner, seat, bind, agents, yes, plan, no_service, ox_home, agents_only } = cli.cmd {
+    if let Cmd::Up { owner, seat, bind, agents, yes, plan, no_service, ox_home, agents_only, capture } = cli.cmd {
         let home = cli.home.clone();
         let db = PathBuf::from(db_path(&home));
-        return up::run(&home, &db, |h| key_path(&home, h), up::Up { owner, seat, bind, agents, yes, plan, no_service, ox_home, agents_only });
+        return up::run(&home, &db, |h| key_path(&home, h), up::Up { owner, seat, bind, agents, yes, plan, no_service, ox_home, agents_only, capture });
     }
     // A server pointed at a home that was never initialised would create an empty database with no owner and answer
     // healthy, and every token would then fail (measured 1 Nov 2026: a launchd or systemd unit naming another ORACLE_HOME

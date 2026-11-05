@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Capture is off until explicitly enabled (Blaze's decision, 5 Nov 2026): `oracle up` adds only the start hook (the brief); `oracle up --capture` adds the compact and end hooks that turn sessions into memories.
+
 - Security: a tag or client_op holding a control character is refused. The tags were signed as one newline-joined digest, so ["a\nb"] and ["a", "b"] signed the same bytes and a signature for one passed for the other (Ramanujan's N2 audit). No stored envelope holds one (checked on the live store), so nothing already signed changes.
 
 - An MCP seat can write and move a plan (Emmy, 5 Nov 2026: `oracle_task` dropped `data`, so plan.oracle.security-gate had to be

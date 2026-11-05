@@ -28,6 +28,9 @@ pub struct Up {
     pub no_service: bool,
     pub ox_home: Option<PathBuf>,
     pub agents_only: bool,
+    /// Capture sessions into memories (hooks on compact and end). Off unless asked (Blaze, 5 Nov 2026: 'Capture off until
+    /// explicitly enabled').
+    pub capture: bool,
 }
 
 use oracle_server::naming::handle_ok;
@@ -140,7 +143,7 @@ fn has_mcp_oracle(bin: &Path) -> bool {
 }
 
 /// The agents found here, and the command that connects each to `ox mcp`. Existing entries are kept, never replaced.
-fn agent_steps(wanted: &[String], ox: &Path, ox_home: &Path) -> Result<Vec<Step>> {
+fn agent_steps(wanted: &[String], ox: &Path, ox_home: &Path, capture_on: bool) -> Result<Vec<Step>> {
     let all = wanted.is_empty() || wanted.iter().any(|a| a == "auto");
     let want = |a: &str| all || wanted.iter().any(|w| w == a);
     let mut out: Vec<Step> = Vec::new();
@@ -182,13 +185,16 @@ fn agent_steps(wanted: &[String], ox: &Path, ox_home: &Path) -> Result<Vec<Step>
     let brief = format!("{} --home {} brief", sh_quote(&ox_s), sh_quote(&home_s));
     let capture = |agent: &str| format!("{} --home {} capture --hook {agent}", sh_quote(&ox_s), sh_quote(&home_s));
     let cursor_dir = home_dir()?.join(".cursor");
+    // Capture is off until the owner turns it on (Blaze, 5 Nov 2026, Emmy's card): by default
+    // an agent only wakes with the brief; `oracle up --capture` adds the compact and end hooks.
+    let keep = |v: Vec<(&'static str, String)>| -> Vec<(&'static str, String)> { v.into_iter().enumerate().filter(|(i, _)| *i == 0 || capture_on).map(|(_, x)| x).collect() };
     let plans: [HookPlan; 3] = [
         ("claude-code", on_path("claude").is_some(), home_dir()?.join(".claude/settings.json"), HookShape::Grouped,
-            vec![("SessionStart", brief.clone()), ("PreCompact", capture("claude-code")), ("SessionEnd", capture("claude-code"))]),
+            keep(vec![("SessionStart", brief.clone()), ("PreCompact", capture("claude-code")), ("SessionEnd", capture("claude-code"))])),
         ("codex", on_path("codex").is_some(), home_dir()?.join(".codex/hooks.json"), HookShape::Grouped,
-            vec![("SessionStart", brief.clone()), ("PreCompact", capture("codex")), ("SessionEnd", capture("codex"))]),
+            keep(vec![("SessionStart", brief.clone()), ("PreCompact", capture("codex")), ("SessionEnd", capture("codex"))])),
         ("cursor", cursor_dir.is_dir(), cursor_dir.join("hooks.json"), HookShape::Flat,
-            vec![("sessionStart", format!("{brief} --hook cursor")), ("preCompact", capture("cursor")), ("sessionEnd", capture("cursor"))]),
+            keep(vec![("sessionStart", format!("{brief} --hook cursor")), ("preCompact", capture("cursor")), ("sessionEnd", capture("cursor"))])),
     ];
     for (agent, found, file, shape, wants) in plans {
         if !want(agent) || !found {
@@ -197,7 +203,7 @@ fn agent_steps(wanted: &[String], ox: &Path, ox_home: &Path) -> Result<Vec<Step>
         let mut probe = read_json_or_empty(&file)?;
         let missing = add_hooks(&mut probe, shape, &wants).with_context(|| format!("{} not touched", file.display()))?;
         if missing.is_empty() {
-            out.push(Step { say: format!("{agent} already wakes with the brief and is captured ({}); kept", file.display()), run: None });
+            out.push(Step { say: format!("{agent} already wakes with the brief{} ({}); kept", if capture_on { " and is captured" } else { "" }, file.display()), run: None });
             continue;
         }
         let trust = if agent == "codex" { "; Codex asks you to trust new hooks once (/hooks)" } else { "" };
@@ -449,7 +455,7 @@ pub fn run(home: &Path, db: &Path, key_path: impl Fn(&str) -> PathBuf, a: Up) ->
         if !cfg.is_file() {
             bail!("--agents-only connects agents to a seat `oracle up` already made, and {} holds none", cfg.display());
         }
-        let agents = agent_steps(&a.agents, &ox, &ox_home)?;
+        let agents = agent_steps(&a.agents, &ox, &ox_home, a.capture)?;
         println!("oracle up --agents-only: here is the plan");
         for s in &agents {
             println!("  agent         {}", s.say);
@@ -489,7 +495,7 @@ pub fn run(home: &Path, db: &Path, key_path: impl Fn(&str) -> PathBuf, a: Up) ->
         None if a.no_service => println!("  server        not installed as a service (--no-service): run `oracle --home {} serve --bind {}`", sh_quote(&home.display().to_string()), a.bind),
         None => println!("  server        no per-user service on this OS yet: run `oracle --home {} serve --bind {}` (it stays up while that runs)", sh_quote(&home.display().to_string()), a.bind),
     }
-    let agents = agent_steps(&a.agents, &ox, &ox_home)?;
+    let agents = agent_steps(&a.agents, &ox, &ox_home, a.capture)?;
     if agents.is_empty() {
         println!("  agents        none found (Claude Code, Codex, Cursor); connect any later: docs/mcp.md");
     }
@@ -563,6 +569,15 @@ pub fn run(home: &Path, db: &Path, key_path: impl Fn(&str) -> PathBuf, a: Up) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capture_hooks_are_added_only_when_asked() {
+        // Blaze, 5 Nov 2026: capture off until explicitly enabled. The start hook alone by default; with --capture, all three.
+        let keep = |on: bool, v: Vec<(&'static str, String)>| -> Vec<&'static str> { v.into_iter().enumerate().filter(|(i, _)| *i == 0 || on).map(|(_, x)| x.0).collect() };
+        let v = || vec![("SessionStart", "b".to_string()), ("PreCompact", "c".to_string()), ("SessionEnd", "c".to_string())];
+        assert_eq!(keep(false, v()), ["SessionStart"]);
+        assert_eq!(keep(true, v()), ["SessionStart", "PreCompact", "SessionEnd"]);
+    }
+
     use super::*;
 
     fn sha(p: &Path) -> String {
